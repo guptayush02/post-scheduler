@@ -14,7 +14,7 @@ export function parseApiDate(iso: string): Date {
 }
 
 export type Platform = 'facebook_page' | 'instagram_reel' | 'instagram_post'
-export type PostStatus = 'scheduled' | 'published' | 'failed'
+export type PostStatus = 'scheduled' | 'processing' | 'published' | 'failed'
 export type MediaType = 'image' | 'video'
 
 export interface User {
@@ -31,10 +31,13 @@ export interface Post {
   platform: Platform | null
   social_account_id: string | null
   social_account_name: string | null
+  also_post_to_instagram: boolean
   scheduled_at: string
   status: PostStatus
   published_at: string | null
   error_message: string | null
+  instagram_post_id: string | null
+  instagram_error: string | null
   created_at: string
   updated_at: string
 }
@@ -82,6 +85,7 @@ export interface PostFormInput {
   scheduled_at: string
   platform: Platform | ''
   social_account_id?: string | ''
+  also_post_to_instagram?: boolean
   media?: File | null
 }
 
@@ -91,6 +95,7 @@ function toFormData(input: PostFormInput): FormData {
   form.append('scheduled_at', input.scheduled_at)
   if (input.platform) form.append('platform', input.platform)
   if (input.social_account_id) form.append('social_account_id', input.social_account_id)
+  form.append('also_post_to_instagram', String(input.also_post_to_instagram ?? false))
   if (input.media) form.append('media', input.media)
   return form
 }

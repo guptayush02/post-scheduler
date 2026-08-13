@@ -75,11 +75,14 @@ def _post_response(post: ScheduledPost, account_name: str | None) -> PostRespons
         platform=post.platform,
         social_account_id=str(post.social_account_id) if post.social_account_id else None,
         social_account_name=account_name,
+        also_post_to_instagram=post.also_post_to_instagram,
         scheduled_at=post.scheduled_at,
         status=post.status,
         published_at=post.published_at,
         external_post_id=post.external_post_id,
         error_message=post.error_message,
+        instagram_post_id=post.instagram_post_id,
+        instagram_error=post.instagram_error,
         created_at=post.created_at,
         updated_at=post.updated_at,
     )
@@ -103,6 +106,7 @@ async def create_post(
     scheduled_at: datetime = Form(...),
     platform: Platform | None = Form(default=None),
     social_account_id: str | None = Form(default=None),
+    also_post_to_instagram: bool = Form(default=False),
     media: UploadFile | None = File(default=None),
     current_user: User = Depends(get_current_user),
 ):
@@ -120,6 +124,7 @@ async def create_post(
         media_type=media_type,
         platform=platform,
         social_account_id=account.id if account else None,
+        also_post_to_instagram=also_post_to_instagram and account is not None,
         scheduled_at=scheduled_at,
     )
     await post.insert()
@@ -164,16 +169,12 @@ async def update_post(
     scheduled_at: datetime = Form(...),
     platform: Platform | None = Form(default=None),
     social_account_id: str | None = Form(default=None),
+    also_post_to_instagram: bool = Form(default=False),
     media: UploadFile | None = File(default=None),
     current_user: User = Depends(get_current_user),
 ):
     post = await _get_owned_post(post_id, current_user)
-
-    if post.status != PostStatus.scheduled:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only posts that are still scheduled can be edited",
-        )
+    was_scheduled = post.status == PostStatus.scheduled
 
     account = await _resolve_social_account(social_account_id, current_user)
 
@@ -181,6 +182,7 @@ async def update_post(
     post.scheduled_at = scheduled_at
     post.platform = platform
     post.social_account_id = account.id if account else None
+    post.also_post_to_instagram = also_post_to_instagram and account is not None
 
     if media is not None and media.filename:
         old_media_path = post.media_path
@@ -189,6 +191,18 @@ async def update_post(
         post.media_type = media_type
         if old_media_path:
             Path(old_media_path).unlink(missing_ok=True)
+
+    if not was_scheduled:
+        # Editing a published/failed post re-arms it for another publish
+        # attempt at the new time. Clear the previous attempt's result -
+        # any Facebook/Instagram post already made stays live as-is, this
+        # just describes a fresh attempt going forward.
+        post.status = PostStatus.scheduled
+        post.published_at = None
+        post.external_post_id = None
+        post.error_message = None
+        post.instagram_post_id = None
+        post.instagram_error = None
 
     post.updated_at = datetime.now(timezone.utc)
     await post.save()

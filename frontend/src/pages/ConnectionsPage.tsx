@@ -84,10 +84,7 @@ export default function ConnectionsPage() {
       <p className="mt-4 text-sm text-gray-500">
         Connecting brings in a Facebook Page and, if linked, its Instagram professional
         account — Instagram is managed through the Page, so there's no separate Instagram
-        login. Requires <code className="rounded bg-gray-100 px-1 py-0.5">FB_APP_ID</code> /{' '}
-        <code className="rounded bg-gray-100 px-1 py-0.5">FB_APP_SECRET</code> to be set in{' '}
-        <code className="rounded bg-gray-100 px-1 py-0.5">backend/.env</code> from a Meta
-        Developer App.
+        login.
       </p>
 
       {loading && <p className="mt-6 text-sm text-gray-500">Loading...</p>}

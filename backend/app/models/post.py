@@ -8,6 +8,7 @@ from typing_extensions import Annotated
 
 class PostStatus(str, Enum):
     scheduled = "scheduled"
+    processing = "processing"
     published = "published"
     failed = "failed"
 
@@ -30,11 +31,14 @@ class ScheduledPost(Document):
     media_type: MediaType | None = None
     platform: Platform | None = None
     social_account_id: PydanticObjectId | None = None
+    also_post_to_instagram: bool = False
     scheduled_at: datetime
     status: PostStatus = PostStatus.scheduled
     published_at: datetime | None = None
     external_post_id: str | None = None
     error_message: str | None = None
+    instagram_post_id: str | None = None
+    instagram_error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

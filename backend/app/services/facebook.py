@@ -1,9 +1,13 @@
+import asyncio
 from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
 
 from app.core.config import settings
+
+INSTAGRAM_CONTAINER_POLL_INTERVAL_SECONDS = 2
+INSTAGRAM_CONTAINER_MAX_POLLS = 30
 
 
 class FacebookAPIError(Exception):
@@ -132,3 +136,51 @@ async def publish_page_video(page_id: str, page_token: str, description: str, fi
         file_path,
         "source",
     )
+
+
+async def create_instagram_container(
+    ig_user_id: str, ig_token: str, caption: str, media_url: str, is_video: bool
+) -> str:
+    """Starts Instagram's async media processing for a publicly-fetchable
+    media_url. Returns a creation_id (container) to poll and then publish.
+    """
+    data = {"caption": caption, "access_token": ig_token}
+    if is_video:
+        data["video_url"] = media_url
+        data["media_type"] = "REELS"
+    else:
+        data["image_url"] = media_url
+
+    result = await _post_form(f"{ig_user_id}/media", data)
+    return result["id"]
+
+
+async def get_container_status(creation_id: str, ig_token: str) -> str:
+    data = await _get(creation_id, {"fields": "status_code", "access_token": ig_token})
+    return data.get("status_code", "UNKNOWN")
+
+
+async def publish_instagram_container(ig_user_id: str, ig_token: str, creation_id: str) -> dict:
+    return await _post_form(
+        f"{ig_user_id}/media_publish", {"creation_id": creation_id, "access_token": ig_token}
+    )
+
+
+async def publish_to_instagram(
+    ig_user_id: str, ig_token: str, caption: str, media_url: str, is_video: bool
+) -> str:
+    """Full create-container -> poll -> publish flow. Returns the published media id."""
+    creation_id = await create_instagram_container(ig_user_id, ig_token, caption, media_url, is_video)
+
+    for _ in range(INSTAGRAM_CONTAINER_MAX_POLLS):
+        status_code = await get_container_status(creation_id, ig_token)
+        if status_code == "FINISHED":
+            break
+        if status_code in ("ERROR", "EXPIRED"):
+            raise FacebookAPIError(f"Instagram media processing failed ({status_code})")
+        await asyncio.sleep(INSTAGRAM_CONTAINER_POLL_INTERVAL_SECONDS)
+    else:
+        raise FacebookAPIError("Timed out waiting for Instagram to finish processing the media")
+
+    result = await publish_instagram_container(ig_user_id, ig_token, creation_id)
+    return result.get("id", "")

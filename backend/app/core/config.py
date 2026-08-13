@@ -35,5 +35,12 @@ class Settings(BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     token_encryption_key: str = ""
 
+    # Public HTTPS base URL (e.g. an ngrok tunnel to this backend) used to build
+    # a publicly-fetchable media URL for Instagram's Content Publishing API,
+    # which cannot accept direct file uploads like Facebook can. Leave blank
+    # until you have one - Instagram cross-posting will report a clear error
+    # instead of silently failing.
+    public_base_url: str = ""
+
 
 settings = Settings()

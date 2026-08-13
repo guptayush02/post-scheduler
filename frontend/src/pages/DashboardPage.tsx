@@ -4,6 +4,7 @@ import { deletePost, listPosts, parseApiDate, type Post, type PostStatus } from 
 
 const STATUS_STYLES: Record<PostStatus, string> = {
   scheduled: 'bg-amber-100 text-amber-800',
+  processing: 'bg-blue-100 text-blue-800',
   published: 'bg-green-100 text-green-800',
   failed: 'bg-red-100 text-red-800',
 }
@@ -87,22 +88,33 @@ export default function DashboardPage() {
               {post.status === 'failed' && post.error_message && (
                 <p className="mt-1 text-xs text-red-600">{post.error_message}</p>
               )}
+              {post.also_post_to_instagram && (
+                <p className="mt-1 text-xs">
+                  {post.instagram_post_id && (
+                    <span className="text-green-700">Instagram: posted</span>
+                  )}
+                  {post.instagram_error && (
+                    <span className="text-red-600">Instagram: {post.instagram_error}</span>
+                  )}
+                  {!post.instagram_post_id && !post.instagram_error && (
+                    <span className="text-gray-500">Instagram: pending</span>
+                  )}
+                </p>
+              )}
             </div>
             <span
               className={`flex-none rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_STYLES[post.status]}`}
             >
               {post.status}
             </span>
-            {post.status === 'scheduled' && (
-              <div className="flex flex-none gap-3 text-sm">
-                <Link to={`/compose/${post.id}`} className="text-indigo-600 hover:underline">
-                  Edit
-                </Link>
-                <button onClick={() => onDelete(post.id)} className="text-red-600 hover:underline">
-                  Delete
-                </button>
-              </div>
-            )}
+            <div className="flex flex-none gap-3 text-sm">
+              <Link to={`/compose/${post.id}`} className="text-indigo-600 hover:underline">
+                Edit
+              </Link>
+              <button onClick={() => onDelete(post.id)} className="text-red-600 hover:underline">
+                Delete
+              </button>
+            </div>
           </li>
         ))}
       </ul>

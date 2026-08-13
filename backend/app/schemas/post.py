@@ -26,10 +26,13 @@ class PostResponse(BaseModel):
     platform: Platform | None
     social_account_id: str | None
     social_account_name: str | None
+    also_post_to_instagram: bool
     scheduled_at: UtcDatetime
     status: PostStatus
     published_at: UtcDatetime | None
     external_post_id: str | None
     error_message: str | None
+    instagram_post_id: str | None
+    instagram_error: str | None
     created_at: UtcDatetime
     updated_at: UtcDatetime

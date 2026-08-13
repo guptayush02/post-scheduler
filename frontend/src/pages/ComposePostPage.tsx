@@ -7,6 +7,7 @@ import {
   parseApiDate,
   updatePost,
   type Platform,
+  type PostStatus,
   type SocialAccount,
 } from '../api/client'
 
@@ -43,9 +44,11 @@ export default function ComposePostPage() {
   const [scheduledAt, setScheduledAt] = useState('')
   const [platform, setPlatform] = useState<Platform | ''>('')
   const [socialAccountId, setSocialAccountId] = useState('')
+  const [alsoPostToInstagram, setAlsoPostToInstagram] = useState(false)
   const [accounts, setAccounts] = useState<SocialAccount[]>([])
   const [media, setMedia] = useState<File | null>(null)
   const [existingMediaPath, setExistingMediaPath] = useState<string | null>(null)
+  const [postStatus, setPostStatus] = useState<PostStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -61,12 +64,23 @@ export default function ComposePostPage() {
           setScheduledAt(toDatetimeLocalValue(post.scheduled_at))
           setPlatform(post.platform ?? '')
           setSocialAccountId(post.social_account_id ?? '')
+          setAlsoPostToInstagram(post.also_post_to_instagram)
           setExistingMediaPath(post.media_path)
+          setPostStatus(post.status)
         }
       })
       .catch(() => setError('Failed to load post'))
       .finally(() => setLoading(false))
   }, [id])
+
+  const selectedAccount = accounts.find((a) => a.id === socialAccountId)
+  const canCrossPostToInstagram = Boolean(selectedAccount?.instagram_username)
+
+  const onAccountChange = (value: string) => {
+    setSocialAccountId(value)
+    const account = accounts.find((a) => a.id === value)
+    if (!account?.instagram_username) setAlsoPostToInstagram(false)
+  }
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -78,6 +92,7 @@ export default function ComposePostPage() {
         scheduled_at: toIsoString(scheduledAt),
         platform,
         social_account_id: socialAccountId,
+        also_post_to_instagram: alsoPostToInstagram && canCrossPostToInstagram,
         media,
       }
       if (isEdit && id) {
@@ -102,6 +117,13 @@ export default function ComposePostPage() {
       <h1 className="text-xl font-semibold text-gray-900">
         {isEdit ? 'Edit post' : 'Schedule a post'}
       </h1>
+      {(postStatus === 'published' || postStatus === 'failed') && (
+        <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          This post already {postStatus === 'published' ? 'went out' : 'failed to publish'}. Saving
+          will re-schedule it for the date/time below as a fresh publish attempt — any previous
+          Facebook/Instagram post stays as-is.
+        </p>
+      )}
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700">Caption</label>
@@ -127,7 +149,7 @@ export default function ComposePostPage() {
           ) : (
             <select
               value={socialAccountId}
-              onChange={(e) => setSocialAccountId(e.target.value)}
+              onChange={(e) => onAccountChange(e.target.value)}
               className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
             >
               <option value="">Not set</option>
@@ -139,6 +161,24 @@ export default function ComposePostPage() {
             </select>
           )}
         </div>
+
+        {canCrossPostToInstagram && (
+          <div className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              id="also_post_to_instagram"
+              checked={alsoPostToInstagram}
+              onChange={(e) => setAlsoPostToInstagram(e.target.checked)}
+              className="mt-0.5"
+            />
+            <label htmlFor="also_post_to_instagram" className="text-sm text-gray-700">
+              Also post to Instagram (@{selectedAccount?.instagram_username})
+              <span className="block text-xs text-gray-500">
+                Requires an image or video, and a public media URL to be configured on the backend.
+              </span>
+            </label>
+          </div>
+        )}
 
         <div>
           <label className="block text-sm font-medium text-gray-700">Platform</label>
@@ -154,7 +194,8 @@ export default function ComposePostPage() {
             ))}
           </select>
           <p className="mt-1 text-xs text-gray-500">
-            Not published anywhere yet — this is captured for when social publishing is wired up.
+            Informational only — the account picker above (and the Instagram checkbox) controls
+            where this actually gets published.
           </p>
         </div>
 
@@ -190,7 +231,13 @@ export default function ComposePostPage() {
             disabled={submitting}
             className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
           >
-            {submitting ? 'Saving...' : isEdit ? 'Save changes' : 'Schedule post'}
+            {submitting
+              ? 'Saving...'
+              : isEdit
+                ? postStatus === 'published' || postStatus === 'failed'
+                  ? 'Save & reschedule'
+                  : 'Save changes'
+                : 'Schedule post'}
           </button>
           <button
             type="button"
