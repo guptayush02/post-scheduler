@@ -1,0 +1,39 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    mongodb_url: str = "mongodb://localhost:27017"
+    mongodb_db_name: str = "scheduler"
+
+    jwt_secret: str = "dev-secret-change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_expires_days: int = 7
+
+    uploads_dir: str = "uploads"
+
+    frontend_base_url: str = "http://localhost:5173"
+
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str = "no-reply@scheduler.local"
+
+    fb_app_id: str | None = None
+    fb_app_secret: str | None = None
+    fb_graph_version: str = "v21.0"
+    fb_oauth_redirect_uri: str = "http://localhost:8000/api/social/facebook/callback"
+    fb_oauth_scopes: str = (
+        "pages_show_list,pages_read_engagement,pages_manage_posts,"
+        "pages_manage_metadata,instagram_basic,instagram_content_publish,"
+        "business_management"
+    )
+
+    # Fernet key for encrypting stored access/refresh tokens at rest.
+    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    token_encryption_key: str = ""
+
+
+settings = Settings()
