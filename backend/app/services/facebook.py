@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -119,12 +120,27 @@ async def publish_page_feed(page_id: str, page_token: str, message: str) -> dict
 
 
 async def publish_page_photo(page_id: str, page_token: str, caption: str, file_path: str) -> dict:
-    """Direct-upload a local image file as a Page photo post. Returns {id, post_id}."""
-    return await _post_multipart(
+    """Uploads a local image and creates a proper feed post with it attached.
+
+    Posting straight to /{page_id}/photos (with published defaulting to true)
+    only reliably adds the image to the Page's "Photos" album rather than
+    creating a normal timeline post - this two-step flow (upload unpublished,
+    then attach it to a /feed post) is Meta's documented way to get a real
+    feed post out of a single photo.
+    """
+    photo = await _post_multipart(
         f"{page_id}/photos",
-        {"caption": caption, "access_token": page_token},
+        {"published": "false", "access_token": page_token},
         file_path,
         "source",
+    )
+    return await _post_form(
+        f"{page_id}/feed",
+        {
+            "message": caption,
+            "attached_media": json.dumps([{"media_fbid": photo["id"]}]),
+            "access_token": page_token,
+        },
     )
 
 

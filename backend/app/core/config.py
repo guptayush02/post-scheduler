@@ -15,6 +15,16 @@ class Settings(BaseSettings):
 
     frontend_base_url: str = "http://localhost:5173"
 
+    # Path to the built frontend (npm run build output) - if this directory
+    # exists at startup, the backend serves it directly (single-service
+    # production deploys). Absent in local dev, where Vite's own dev server
+    # + proxy handles the frontend instead.
+    frontend_dist_dir: str = "frontend_dist"
+
+    # Cookies are only marked Secure once served over real HTTPS (e.g. Fly.io
+    # in production) - keep false for local http:// dev.
+    cookie_secure: bool = False
+
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None

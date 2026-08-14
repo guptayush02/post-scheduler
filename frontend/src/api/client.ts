@@ -27,6 +27,7 @@ export interface Post {
   id: string
   caption: string
   media_path: string | null
+  media_url: string | null
   media_type: MediaType | null
   platform: Platform | null
   social_account_id: string | null
@@ -70,8 +71,16 @@ export async function resendVerification(email: string): Promise<void> {
   await api.post('/auth/resend-verification', { email })
 }
 
-export async function listPosts(): Promise<Post[]> {
-  const res = await api.get<Post[]>('/posts')
+export interface PaginatedPosts {
+  items: Post[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}
+
+export async function listPosts(page = 1, pageSize = 10): Promise<PaginatedPosts> {
+  const res = await api.get<PaginatedPosts>('/posts', { params: { page, page_size: pageSize } })
   return res.data
 }
 
@@ -141,5 +150,9 @@ export async function disconnectSocialAccount(id: string): Promise<void> {
 }
 
 export function facebookConnectUrl(): string {
-  return `${import.meta.env.VITE_API_BASE_URL}/api/social/facebook/connect`
+  // In local dev, VITE_API_BASE_URL points at the separate backend (:8000).
+  // In production, frontend and backend are served from the same origin, so
+  // an empty base resolves to a same-origin relative URL with zero config.
+  const base = import.meta.env.VITE_API_BASE_URL ?? ''
+  return `${base}/api/social/facebook/connect`
 }

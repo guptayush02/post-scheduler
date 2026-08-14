@@ -22,6 +22,7 @@ class PostResponse(BaseModel):
     id: str
     caption: str
     media_path: str | None
+    media_url: str | None
     media_type: MediaType | None
     platform: Platform | None
     social_account_id: str | None
@@ -36,3 +37,11 @@ class PostResponse(BaseModel):
     instagram_error: str | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
+
+
+class PaginatedPosts(BaseModel):
+    items: list[PostResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int

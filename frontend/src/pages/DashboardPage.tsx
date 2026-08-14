@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { deletePost, listPosts, parseApiDate, type Post, type PostStatus } from '../api/client'
+import PostPreviewModal from '../components/PostPreviewModal'
 
 const STATUS_STYLES: Record<PostStatus, string> = {
   scheduled: 'bg-amber-100 text-amber-800',
@@ -9,18 +10,31 @@ const STATUS_STYLES: Record<PostStatus, string> = {
   failed: 'bg-red-100 text-red-800',
 }
 
+const PAGE_SIZE = 10
+
 function formatDateTime(iso: string): string {
   return parseApiDate(iso).toLocaleString()
 }
 
 export default function DashboardPage() {
   const [posts, setPosts] = useState<Post[]>([])
+  const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [previewPost, setPreviewPost] = useState<Post | null>(null)
 
-  const load = async () => {
+  const load = async (targetPage: number) => {
     try {
-      setPosts(await listPosts())
+      const result = await listPosts(targetPage, PAGE_SIZE)
+      setPosts(result.items)
+      setTotalPages(result.total_pages)
+      setTotal(result.total)
+      // If posts got deleted and this page is now past the end, snap back.
+      if (result.items.length === 0 && result.total > 0 && targetPage > result.total_pages) {
+        setPage(result.total_pages)
+      }
     } catch {
       setError('Failed to load posts')
     } finally {
@@ -29,15 +43,15 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    load()
-    const interval = setInterval(load, 15000)
+    load(page)
+    const interval = setInterval(() => load(page), 15000)
     return () => clearInterval(interval)
-  }, [])
+  }, [page])
 
   const onDelete = async (id: string) => {
     if (!confirm('Delete this post?')) return
     await deletePost(id)
-    setPosts((prev) => prev.filter((p) => p.id !== id))
+    load(page)
   }
 
   return (
@@ -68,15 +82,15 @@ export default function DashboardPage() {
       <ul className="mt-6 divide-y divide-gray-200">
         {posts.map((post) => (
           <li key={post.id} className="flex items-center gap-4 py-4">
-            {post.media_path && post.media_type === 'image' && (
+            {post.media_url && post.media_type === 'image' && (
               <img
-                src={`/${post.media_path}`}
+                src={post.media_url}
                 alt=""
                 className="h-16 w-16 flex-none rounded object-cover"
               />
             )}
-            {post.media_path && post.media_type === 'video' && (
-              <video src={`/${post.media_path}`} className="h-16 w-16 flex-none rounded object-cover" />
+            {post.media_url && post.media_type === 'video' && (
+              <video src={post.media_url} className="h-16 w-16 flex-none rounded object-cover" />
             )}
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium text-gray-900">{post.caption}</p>
@@ -108,6 +122,12 @@ export default function DashboardPage() {
               {post.status}
             </span>
             <div className="flex flex-none gap-3 text-sm">
+              <button
+                onClick={() => setPreviewPost(post)}
+                className="text-gray-600 hover:underline"
+              >
+                Preview
+              </button>
               <Link to={`/compose/${post.id}`} className="text-indigo-600 hover:underline">
                 Edit
               </Link>
@@ -118,6 +138,32 @@ export default function DashboardPage() {
           </li>
         ))}
       </ul>
+
+      {total > 0 && (
+        <div className="mt-6 flex items-center justify-between text-sm text-gray-600">
+          <span>
+            Page {page} of {totalPages} &middot; {total} post{total === 1 ? '' : 's'}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              className="rounded-md border border-gray-300 px-3 py-1 disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={page >= totalPages}
+              className="rounded-md border border-gray-300 px-3 py-1 disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
+      {previewPost && <PostPreviewModal post={previewPost} onClose={() => setPreviewPost(null)} />}
     </div>
   )
 }

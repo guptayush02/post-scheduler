@@ -72,6 +72,7 @@ async def facebook_connect(current_user: User = Depends(get_current_user)):
         value=state,
         httponly=True,
         samesite="lax",
+        secure=settings.cookie_secure,
         max_age=STATE_COOKIE_MAX_AGE_SECONDS,
     )
     return redirect

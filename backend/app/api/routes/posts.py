@@ -7,10 +7,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 
 from app.core.config import settings
 from app.core.deps import get_current_user
+from app.core.media import media_url_path
 from app.models.post import MediaType, Platform, PostStatus, ScheduledPost
 from app.models.social_account import SocialAccount
 from app.models.user import User
-from app.schemas.post import PostResponse
+from app.schemas.post import PaginatedPosts, PostResponse
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
 
@@ -71,6 +72,7 @@ def _post_response(post: ScheduledPost, account_name: str | None) -> PostRespons
         id=str(post.id),
         caption=post.caption,
         media_path=post.media_path,
+        media_url=media_url_path(post.media_path) if post.media_path else None,
         media_type=post.media_type,
         platform=post.platform,
         social_account_id=str(post.social_account_id) if post.social_account_id else None,
@@ -132,24 +134,39 @@ async def create_post(
     return _post_response(post, account.fb_page_name if account else None)
 
 
-@router.get("", response_model=list[PostResponse])
+@router.get("", response_model=PaginatedPosts)
 async def list_posts(
     status_filter: PostStatus | None = None,
+    page: int = 1,
+    page_size: int = 10,
     current_user: User = Depends(get_current_user),
 ):
+    page = max(page, 1)
+    page_size = max(1, min(page_size, 100))
+
     query = ScheduledPost.find(ScheduledPost.user_id == current_user.id)
     if status_filter is not None:
         query = query.find(ScheduledPost.status == status_filter)
 
-    posts = await query.sort(-ScheduledPost.scheduled_at).to_list()
+    total = await query.count()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+
+    posts = (
+        await query.sort(-ScheduledPost.scheduled_at)
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+        .to_list()
+    )
 
     accounts = await SocialAccount.find(SocialAccount.user_id == current_user.id).to_list()
     account_names = {a.id: a.fb_page_name for a in accounts}
 
-    return [
+    items = [
         _post_response(p, account_names.get(p.social_account_id) if p.social_account_id else None)
         for p in posts
     ]
+
+    return PaginatedPosts(items=items, total=total, page=page, page_size=page_size, total_pages=total_pages)
 
 
 @router.get("/{post_id}", response_model=PostResponse)

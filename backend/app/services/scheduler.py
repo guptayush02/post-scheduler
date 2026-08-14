@@ -6,6 +6,7 @@ from beanie.operators import Set
 
 from app.core.config import settings
 from app.core.crypto import decrypt_token
+from app.core.media import media_url_path
 from app.models.post import MediaType, Platform, PostStatus, ScheduledPost
 from app.models.social_account import ConnectionStatus, SocialAccount
 from app.services import facebook
@@ -58,7 +59,7 @@ async def _publish_to_instagram(post: ScheduledPost, account: SocialAccount) -> 
     if not settings.public_base_url:
         return None, "Public media URL not configured yet (set PUBLIC_BASE_URL, e.g. an ngrok URL)"
 
-    media_url = f"{settings.public_base_url.rstrip('/')}/{post.media_path}"
+    media_url = f"{settings.public_base_url.rstrip('/')}{media_url_path(post.media_path)}"
     page_token = decrypt_token(account.page_access_token_encrypted)
 
     try:

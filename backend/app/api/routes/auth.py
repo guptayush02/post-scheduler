@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
+from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.security import (
     create_access_token,
@@ -102,6 +103,7 @@ async def login(payload: LoginRequest, response: Response):
         value=token,
         httponly=True,
         samesite="lax",
+        secure=settings.cookie_secure,
         max_age=COOKIE_MAX_AGE_SECONDS,
     )
 
