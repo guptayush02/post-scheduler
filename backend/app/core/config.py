@@ -33,13 +33,9 @@ class Settings(BaseSettings):
 
     fb_app_id: str | None = None
     fb_app_secret: str | None = None
-    fb_graph_version: str = "v21.0"
+    fb_graph_version: str = "v26.0"
     fb_oauth_redirect_uri: str = "http://localhost:8000/api/social/facebook/callback"
-    fb_oauth_scopes: str = (
-        "pages_show_list,pages_read_engagement,pages_manage_posts,"
-        "pages_manage_metadata,instagram_basic,instagram_content_publish,"
-        "business_management"
-    )
+    config_id: int | None = None
 
     # Fernet key for encrypting stored access/refresh tokens at rest.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
