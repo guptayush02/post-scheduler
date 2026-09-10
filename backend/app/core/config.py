@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     fb_app_id: str | None = None
     fb_app_secret: str | None = None
     fb_graph_version: str = "v26.0"
-    backend_base_url: str = "http://localhost:8000"
+    backend_base_url: str | None = None
 
     @property
     def fb_oauth_redirect_uri(self) -> str:
