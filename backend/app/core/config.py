@@ -34,7 +34,12 @@ class Settings(BaseSettings):
     fb_app_id: str | None = None
     fb_app_secret: str | None = None
     fb_graph_version: str = "v26.0"
-    fb_oauth_redirect_uri: str = "http://localhost:8000/api/social/facebook/callback"
+    backend_base_url: str = "http://localhost:8000"
+
+    @property
+    def fb_oauth_redirect_uri(self) -> str:
+        return f"{self.backend_base_url}/api/social/facebook/callback"    
+    
     config_id: int | None = None
 
     # Fernet key for encrypting stored access/refresh tokens at rest.
@@ -47,6 +52,7 @@ class Settings(BaseSettings):
     # until you have one - Instagram cross-posting will report a clear error
     # instead of silently failing.
     public_base_url: str = ""
+
 
 
 settings = Settings()
