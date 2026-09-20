@@ -34,12 +34,11 @@ class Settings(BaseSettings):
     fb_app_id: str | None = None
     fb_app_secret: str | None = None
     fb_graph_version: str = "v26.0"
-    backend_base_url: str | None = None
 
-    @property
-    def fb_oauth_redirect_uri(self) -> str:
-        return f"{self.backend_base_url}/api/social/facebook/callback"    
-    
+    # Required, no default - must come from .env / Fly secrets. Must exactly
+    # match a redirect URI registered in the Meta App's Facebook Login settings.
+    fb_oauth_redirect_uri: str
+
     config_id: int | None = None
 
     # Fernet key for encrypting stored access/refresh tokens at rest.

@@ -37,9 +37,10 @@ def build_oauth_url(state: str) -> str:
         "client_id": settings.fb_app_id or "",
         "redirect_uri": settings.fb_oauth_redirect_uri,
         "state": state,
-        "config_id": settings.config_id,
         "response_type": "code",
     }
+    if settings.config_id is not None:
+        params["config_id"] = settings.config_id
     return f"https://www.facebook.com/{settings.fb_graph_version}/dialog/oauth?{urlencode(params)}"
 
 

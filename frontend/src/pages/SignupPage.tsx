@@ -80,6 +80,15 @@ export default function SignupPage() {
           Log in
         </Link>
       </p>
+      <p className="mt-6 text-center text-xs text-gray-400">
+        <Link to="/privacy" className="hover:underline">
+          Privacy Policy
+        </Link>{' '}
+        &middot;{' '}
+        <Link to="/terms" className="hover:underline">
+          Terms of Service
+        </Link>
+      </p>
     </div>
   )
 }
