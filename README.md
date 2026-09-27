@@ -26,6 +26,9 @@ Live deployment: **https://post-scheduler-sutra.fly.dev**
 - Python 3.12 (3.14 currently breaks `venv`'s `ensurepip` on macOS — use 3.12)
 - Node.js 18+
 - A running MongoDB instance (local `mongod`, Docker, or an Atlas URL)
+- `ffmpeg` on your `PATH` (e.g. `brew install ffmpeg` on macOS) — needed to
+  generate reel videos from images; the rest of the app runs fine without it,
+  "Generate reel" posts will just fail to generate
 - A [Meta Developer App](https://developers.facebook.com/) with the Facebook
   Login product added (needed to actually connect/publish; without it the
   app still runs, "Connect with Facebook" just won't work)
@@ -158,6 +161,11 @@ fly secrets set \
 fly deploy
 ```
 
+```
+In case of any issue of deployment run command
+`sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder`
+```
+
 Then, two things that live outside the repo:
 
 1. **MongoDB Atlas → Network Access** — add `0.0.0.0/0`. Fly's free tier
@@ -226,3 +234,62 @@ fly.toml       # Fly.io app config (volume mount, always-on machine, env)
   original Facebook/Instagram post — it's a fresh publish attempt for the
   new time, not an edit of what's already live (neither platform supports
   scheduling edits after the fact).
+- "Generate reel" saves a `draft` post and runs FFmpeg (Ken Burns zoom/pan +
+  crossfades + a burned-in caption, from 0–10 uploaded images and/or videos)
+  in the background via the scheduler - generation is not tied to the compose page
+  staying open. Once the video's ready the draft stays a draft until the user
+  previews it and picks a schedule time from the dashboard (`POST
+  /api/posts/{id}/schedule`); only then does it enter the normal
+  scheduled/publish pipeline. FFmpeg runs synchronously in a subprocess on
+  the same machine as the web server — on a single shared-CPU Fly.io VM this
+  can take 1–3+ minutes and will visibly slow down other requests while it
+  runs. Fine at hobby scale; a real queue/worker would be the fix at higher
+  volume. The dashboard list is sorted by most-recently-created rather than
+  by schedule time, so a fresh draft (which has no schedule time yet)
+  reliably shows up at the top.
+- Reel sources, and optional AI footage via Hugging Face Inference Providers
+  (`HF_TOKEN`, see `backend/.env.example`; nothing is downloaded or deployed):
+  - **Text only** → scene images from `HF_IMAGE_MODEL` (FLUX.1-schnell), or
+    plain gradient title cards carrying the caption when there's no token or
+    the credits have run out - so a reel always comes out.
+  - **Images / videos** → used as-is; videos are fitted onto a blurred copy of
+    themselves and looped/trimmed to their slot.
+  - **"Add AI-generated video clip"** → `HF_VIDEO_CLIPS` clip(s) from
+    `HF_VIDEO_MODEL` (Wan2.2-TI2V-5B) put at the start: image-to-video of the
+    first uploaded image, falling back to text-to-video from the caption.
+  Each AI call first tries a free public ZeroGPU Space (`HF_SPACE_*`,
+  spends the account's daily ZeroGPU minutes), then billed Inference
+  Providers.
+  AI footage is generated once and saved as reel segments, so regenerating
+  from the Preview dialog doesn't bill it again. HF failures (e.g. a 402 when
+  the free monthly credit is gone) never fail the reel - they show up as a
+  warning in the Preview dialog instead.
+- A ready reel draft can be edited from the dashboard's **Preview** dialog
+  before it's scheduled, and re-rendered with **Regenerate video** (`POST
+  /api/posts/{id}/regenerate`) - nothing re-renders until that button is
+  pressed. What's editable:
+  - **Per image** (drag the thumbnails to reorder; click one to edit it):
+    its own on-screen duration, Ken Burns zoom (in/out/none), the crossfade
+    into the next image (all 58 of ffmpeg's `xfade` transitions), a colour
+    grading preset (warm/cool/vivid/muted/vintage/B&W), and text layers
+    shown only while that image is on screen.
+  - **Whole video**: text layers (font size, colour, 3x3 position grid, up
+    to 5 layers) - defaults to the post's caption, matching how generation
+    burned it in before.
+  - **Audio**: a music track and a voiceover track, each uploaded and
+    trimmed with a drag bar. With both set, the music is auto-ducked under
+    the voice (sidechain compressor) and the two are mixed. A track shorter
+    than the video plays once and then goes silent - it isn't looped. With
+    no track at all the video gets a silent one, since Facebook/Instagram
+    mishandle video with zero audio streams.
+  - Per-image settings are keyed to the image itself, so they follow it when
+    the order is dragged around.
+  - The live preview beside these controls is a CSS approximation (it groups
+    the 58 transitions into a handful of visual families) - it's there to
+    show pacing and rough feel instantly, not to match the final render
+    pixel for pixel.
+- Text overlays need an ffmpeg built with `libfreetype` (the `drawtext`
+  filter) plus a usable font. The Docker image installs both; a plain
+  `brew install ffmpeg` on macOS ships **without** drawtext, so reels
+  generated on such a machine come out with no burned-in text (the rest
+  still renders, and a warning is logged).

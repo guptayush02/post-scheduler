@@ -37,6 +37,7 @@ def build_oauth_url(state: str) -> str:
         "client_id": settings.fb_app_id or "",
         "redirect_uri": settings.fb_oauth_redirect_uri,
         "state": state,
+        "scope": settings.fb_oauth_scopes,
         "response_type": "code",
     }
     if settings.config_id is not None:

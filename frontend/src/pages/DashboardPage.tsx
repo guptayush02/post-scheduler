@@ -4,6 +4,9 @@ import { deletePost, listPosts, parseApiDate, type Post, type PostStatus } from 
 import PostPreviewModal from '../components/PostPreviewModal'
 
 const STATUS_STYLES: Record<PostStatus, string> = {
+  generating_video: 'bg-purple-100 text-purple-800',
+  draft: 'bg-indigo-100 text-indigo-800',
+  generation_failed: 'bg-red-100 text-red-800',
   scheduled: 'bg-amber-100 text-amber-800',
   processing: 'bg-blue-100 text-blue-800',
   published: 'bg-green-100 text-green-800',
@@ -12,8 +15,8 @@ const STATUS_STYLES: Record<PostStatus, string> = {
 
 const PAGE_SIZE = 10
 
-function formatDateTime(iso: string): string {
-  return parseApiDate(iso).toLocaleString()
+function formatDateTime(iso: string | null): string {
+  return iso ? parseApiDate(iso).toLocaleString() : 'Not scheduled yet'
 }
 
 export default function DashboardPage() {
@@ -99,7 +102,18 @@ export default function DashboardPage() {
                 {post.platform && <> &middot; {post.platform.replace('_', ' ')}</>}
                 {post.social_account_name && <> &middot; {post.social_account_name}</>}
               </p>
-              {post.status === 'failed' && post.error_message && (
+              {post.status === 'generating_video' && (
+                <p className="mt-1 text-xs text-purple-600">Generating reel video&hellip;</p>
+              )}
+              {post.reel_warning && (
+                <p className="mt-1 text-xs text-amber-700">{post.reel_warning}</p>
+              )}
+              {post.status === 'draft' && (
+                <p className="mt-1 text-xs text-indigo-600">
+                  Reel ready — click Preview to watch it and schedule it.
+                </p>
+              )}
+              {(post.status === 'failed' || post.status === 'generation_failed') && post.error_message && (
                 <p className="mt-1 text-xs text-red-600">{post.error_message}</p>
               )}
               {post.also_post_to_instagram && (
@@ -163,7 +177,20 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {previewPost && <PostPreviewModal post={previewPost} onClose={() => setPreviewPost(null)} />}
+      {previewPost && (
+        <PostPreviewModal
+          post={previewPost}
+          onClose={() => setPreviewPost(null)}
+          onScheduled={() => {
+            setPreviewPost(null)
+            load(page)
+          }}
+          onRegenerated={() => {
+            setPreviewPost(null)
+            load(page)
+          }}
+        />
+      )}
     </div>
   )
 }

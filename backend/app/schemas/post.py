@@ -24,11 +24,31 @@ class PostResponse(BaseModel):
     media_path: str | None
     media_url: str | None
     media_type: MediaType | None
+    reel_source_images: list[str] | None
+    reel_source_image_urls: list[str] | None
+    reel_target_seconds: float
+    reel_audio_path: str | None
+    reel_audio_url: str | None
+    reel_audio_start_seconds: float
+    reel_audio_end_seconds: float | None
+    reel_voice_audio_path: str | None
+    reel_voice_audio_url: str | None
+    reel_voice_audio_start_seconds: float
+    reel_voice_audio_end_seconds: float | None
+    reel_transition: str
+    reel_zoom_style: str
+    reel_image_transitions: list[str] | None
+    reel_image_zoom_styles: list[str] | None
+    reel_image_durations: list[float] | None
+    reel_text_layers: list[dict] | None
+    reel_image_text_layers: list[list[dict]] | None
+    reel_image_color_filters: list[str] | None
+    reel_warning: str | None
     platform: Platform | None
     social_account_id: str | None
     social_account_name: str | None
     also_post_to_instagram: bool
-    scheduled_at: UtcDatetime
+    scheduled_at: UtcDatetime | None
     status: PostStatus
     published_at: UtcDatetime | None
     external_post_id: str | None

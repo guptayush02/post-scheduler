@@ -1,5 +1,7 @@
 import logging
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from beanie.operators import Set
@@ -10,6 +12,8 @@ from app.core.media import media_url_path
 from app.models.post import MediaType, Platform, PostStatus, ScheduledPost
 from app.models.social_account import ConnectionStatus, SocialAccount
 from app.services import facebook
+from app.services.reel_assets import prepare_reel_sources
+from app.services.reel_generator import generate_reel_video
 from app.services.token_refresh import refresh_due_accounts
 
 logger = logging.getLogger("scheduler.worker")
@@ -151,8 +155,111 @@ async def poll_due_posts() -> None:
             await post.save()
 
 
+async def poll_pending_reels() -> None:
+    # Runs entirely server-side on this interval regardless of whether the
+    # user has the compose page open - generation is never tied to a
+    # request/browser session.
+    pending = await ScheduledPost.find(
+        ScheduledPost.status == PostStatus.generating_video,
+    ).to_list()
+
+    for post in pending:
+        # Same atomic-claim pattern as poll_due_posts, so an overlapping run
+        # (or a second backend instance) never generates the same post twice.
+        claim = await ScheduledPost.find_one(
+            ScheduledPost.id == post.id,
+            ScheduledPost.status == PostStatus.generating_video,
+        ).update(Set({ScheduledPost.status: PostStatus.processing}))
+
+        if claim.modified_count == 0:
+            continue
+
+        # Keep the in-memory copy in step with the claim - the mid-run save
+        # below must not flip it back to generating_video.
+        post.status = PostStatus.processing
+
+        try:
+            user_dir = Path(settings.uploads_dir) / str(post.user_id)
+            user_dir.mkdir(parents=True, exist_ok=True)
+            out_path = str((user_dir / f"{uuid.uuid4().hex}.mp4").as_posix())
+            previous_media_path = post.media_path  # set when this is a regenerate, not a first run
+
+            asset_warnings: list[str] = []
+            if post.reel_ai_pending:
+                logger.info("Preparing reel footage for post %s", post.id)
+                asset_warnings = await prepare_reel_sources(post)
+                # Persist straight away so a failed render (or a regenerate)
+                # reuses this footage rather than generating/billing it again.
+                post.reel_ai_pending = False
+                await post.save()
+
+            n = len(post.reel_source_images or [])
+            zoom_styles = (
+                post.reel_image_zoom_styles
+                if post.reel_image_zoom_styles and len(post.reel_image_zoom_styles) == n
+                else [post.reel_zoom_style] * n
+            )
+            transitions = (
+                post.reel_image_transitions
+                if post.reel_image_transitions and len(post.reel_image_transitions) == n
+                else [post.reel_transition] * n
+            )
+            image_durations = (
+                post.reel_image_durations
+                if post.reel_image_durations and len(post.reel_image_durations) == n
+                else None
+            )
+
+            logger.info("Generating reel video for post %s from %d segments", post.id, n)
+            warnings = await generate_reel_video(
+                post.reel_source_images or [],
+                post.caption,
+                out_path,
+                image_durations=image_durations,
+                target_seconds=post.reel_target_seconds,
+                audio_path=post.reel_audio_path,
+                audio_start=post.reel_audio_start_seconds,
+                audio_end=post.reel_audio_end_seconds,
+                voice_audio_path=post.reel_voice_audio_path,
+                voice_audio_start=post.reel_voice_audio_start_seconds,
+                voice_audio_end=post.reel_voice_audio_end_seconds,
+                transitions=transitions,
+                zoom_styles=zoom_styles,
+                color_filters=(
+                    post.reel_image_color_filters
+                    if post.reel_image_color_filters and len(post.reel_image_color_filters) == n
+                    else None
+                ),
+                text_layers=post.reel_text_layers,
+                image_text_layers=(
+                    post.reel_image_text_layers
+                    if post.reel_image_text_layers and len(post.reel_image_text_layers) == n
+                    else None
+                ),
+            )
+
+            # Ready, but not live yet - the user still has to preview it and
+            # confirm a schedule via POST /{id}/schedule.
+            post.media_path = out_path
+            post.media_type = MediaType.video
+            all_warnings = asset_warnings + warnings
+            post.reel_warning = "; ".join(all_warnings) if all_warnings else None
+            post.status = PostStatus.draft
+            post.error_message = None
+            await post.save()
+            if previous_media_path and previous_media_path != out_path:
+                Path(previous_media_path).unlink(missing_ok=True)
+            logger.info("Reel video ready for post %s: %s", post.id, out_path)
+        except Exception as exc:
+            logger.warning("Reel generation failed for post %s: %s", post.id, exc)
+            post.status = PostStatus.generation_failed
+            post.error_message = str(exc)[:500]
+            await post.save()
+
+
 def start_scheduler() -> None:
     scheduler.add_job(poll_due_posts, "interval", seconds=60, id="poll_due_posts")
+    scheduler.add_job(poll_pending_reels, "interval", seconds=15, id="poll_pending_reels")
     scheduler.add_job(refresh_due_accounts, "interval", hours=24, id="refresh_social_tokens")
     scheduler.start()
 
