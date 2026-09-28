@@ -32,6 +32,8 @@ export default function AudioTrackEditor({
   end,
   onEndChange,
   onRemove,
+  knownDuration = null,
+  children,
 }: {
   label: string
   existingUrl: string | null
@@ -43,6 +45,11 @@ export default function AudioTrackEditor({
   end: number | null
   onEndChange: (end: number | null) => void
   onRemove: () => void
+  // Length in seconds when the file itself doesn't say (browser recordings
+  // in WebM report an Infinity duration).
+  knownDuration?: number | null
+  // Extra controls shown under the label (e.g. a recorder).
+  children?: React.ReactNode
 }) {
   const [duration, setDuration] = useState<number | null>(null)
 
@@ -55,6 +62,7 @@ export default function AudioTrackEditor({
       <label className="block text-xs font-medium text-gray-500">
         {hasExisting ? `Replace ${label.toLowerCase()}` : `\u{1F3B5} Add ${label.toLowerCase()}`}
       </label>
+      {children}
       <input
         type="file"
         accept="audio/*"
@@ -64,7 +72,11 @@ export default function AudioTrackEditor({
         }}
         className="mt-1 block w-full text-sm text-gray-700 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-indigo-600 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-indigo-500"
       />
-      {file && <p className="mt-1 text-xs text-gray-600">Selected: {file.name}</p>}
+      {file && (
+        <p className="mt-1 text-xs text-gray-600">
+          {knownDuration != null ? `Recorded voiceover (${Math.round(knownDuration)}s)` : `Selected: ${file.name}`}
+        </p>
+      )}
 
       {src && (
         <>
@@ -73,7 +85,9 @@ export default function AudioTrackEditor({
             src={src}
             className="mt-2 w-full"
             onLoadedMetadata={(e) => {
-              const d = e.currentTarget.duration
+              const reported = e.currentTarget.duration
+              const d = Number.isFinite(reported) ? reported : (knownDuration ?? 0)
+              if (!d) return
               setDuration(d)
               onEndChange(end == null ? d : Math.min(end, d))
             }}

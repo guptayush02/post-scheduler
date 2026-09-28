@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { deletePost, listPosts, parseApiDate, type Post, type PostStatus } from '../api/client'
-import PostPreviewModal from '../components/PostPreviewModal'
 
 const STATUS_STYLES: Record<PostStatus, string> = {
   generating_video: 'bg-purple-100 text-purple-800',
@@ -26,7 +25,6 @@ export default function DashboardPage() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [previewPost, setPreviewPost] = useState<Post | null>(null)
 
   const load = async (targetPage: number) => {
     try {
@@ -136,12 +134,9 @@ export default function DashboardPage() {
               {post.status}
             </span>
             <div className="flex flex-none gap-3 text-sm">
-              <button
-                onClick={() => setPreviewPost(post)}
-                className="text-gray-600 hover:underline"
-              >
+              <Link to={`/posts/${post.id}/preview`} className="text-gray-600 hover:underline">
                 Preview
-              </button>
+              </Link>
               <Link to={`/compose/${post.id}`} className="text-indigo-600 hover:underline">
                 Edit
               </Link>
@@ -177,20 +172,6 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {previewPost && (
-        <PostPreviewModal
-          post={previewPost}
-          onClose={() => setPreviewPost(null)}
-          onScheduled={() => {
-            setPreviewPost(null)
-            load(page)
-          }}
-          onRegenerated={() => {
-            setPreviewPost(null)
-            load(page)
-          }}
-        />
-      )}
     </div>
   )
 }

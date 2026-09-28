@@ -24,28 +24,104 @@ export type PostStatus =
   | 'failed'
 export type MediaType = 'image' | 'video'
 
+// Mirrors backend/app/services/reel_text.py. (x, y) is the centre of the
+// text block as a 0-1 fraction of the frame - set by dragging it in the
+// live preview; font_size is in px on a 1080px-wide frame.
 export interface ReelTextLayer {
   text: string
+  font: string
   font_size: number
   color: string
-  position: string
+  x: number
+  y: number
+  background: boolean
 }
 
-export const REEL_TEXT_POSITIONS: { value: string; label: string }[] = [
-  { value: 'top_left', label: 'Top left' },
-  { value: 'top_center', label: 'Top center' },
-  { value: 'top_right', label: 'Top right' },
-  { value: 'middle_left', label: 'Middle left' },
-  { value: 'middle_center', label: 'Middle center' },
-  { value: 'middle_right', label: 'Middle right' },
-  { value: 'bottom_left', label: 'Bottom left' },
-  { value: 'bottom_center', label: 'Bottom center' },
-  { value: 'bottom_right', label: 'Bottom right' },
+export const REEL_MIN_FONT_SIZE = 16
+export const REEL_MAX_FONT_SIZE = 160
+export const REEL_MAX_TEXT_LAYERS = 30
+
+export const DEFAULT_TEXT_LAYER: ReelTextLayer = {
+  text: '',
+  font: 'poppins',
+  font_size: 56,
+  color: '#FFFFFF',
+  x: 0.5,
+  y: 0.5,
+  background: true,
+}
+
+// Layers saved before drag-to-position had a `position` preset instead of
+// x/y - same mapping as reel_text.py's _LEGACY_POSITIONS.
+const LEGACY_X: Record<string, number> = { left: 0.3, center: 0.5, right: 0.7 }
+const LEGACY_Y: Record<string, number> = { top: 0.08, middle: 0.5, bottom: 0.88 }
+
+export function normalizeTextLayer(raw: Partial<ReelTextLayer> & { position?: string }): ReelTextLayer {
+  const [vertical, horizontal] = (raw.position ?? 'bottom_center').split('_')
+  return {
+    ...DEFAULT_TEXT_LAYER,
+    ...raw,
+    x: raw.x ?? LEGACY_X[horizontal] ?? 0.5,
+    y: raw.y ?? LEGACY_Y[vertical] ?? 0.88,
+    font: raw.font ?? DEFAULT_TEXT_LAYER.font,
+    background: raw.background ?? true,
+  } as ReelTextLayer
+}
+
+// Mirrors backend/app/services/reel_text.py's CTAs: an animated button
+// that pops up on clip `clip` (an index into the post's clips), `offset`
+// seconds into it, for `duration` seconds - it can run on over later clips.
+export type ReelCtaAnimation = 'pop' | 'slide_up' | 'fade' | 'pulse'
+
+export interface ReelCta {
+  text: string
+  link: string | null
+  clip: number
+  offset: number
+  duration: number
+  x: number
+  y: number
+  font: string
+  font_size: number
+  text_color: string
+  bg_color: string
+  animation: ReelCtaAnimation
+}
+
+export const REEL_CTA_ANIMATIONS: { value: ReelCtaAnimation; label: string }[] = [
+  { value: 'pop', label: 'Pop in' },
+  { value: 'pulse', label: 'Pop in + pulse' },
+  { value: 'slide_up', label: 'Slide up' },
+  { value: 'fade', label: 'Fade in' },
 ]
 
-export const REEL_MIN_FONT_SIZE = 16
-export const REEL_MAX_FONT_SIZE = 120
-export const REEL_MAX_TEXT_LAYERS = 5
+export const REEL_MAX_CTAS = 10
+
+export const DEFAULT_CTA: ReelCta = {
+  text: 'Shop now',
+  link: null,
+  clip: 0,
+  offset: 1,
+  duration: 4,
+  x: 0.5,
+  y: 0.8,
+  font: 'poppins',
+  font_size: 56,
+  text_color: '#FFFFFF',
+  bg_color: '#F97316',
+  animation: 'pop',
+}
+
+export interface ReelFont {
+  id: string
+  name: string
+  url: string
+}
+
+export async function listReelFonts(): Promise<ReelFont[]> {
+  const res = await api.get<ReelFont[]>('/posts/reel-fonts')
+  return res.data
+}
 
 export const REEL_COLOR_FILTERS: { value: string; label: string }[] = [
   { value: 'none', label: 'Original' },
@@ -57,11 +133,13 @@ export const REEL_COLOR_FILTERS: { value: string; label: string }[] = [
   { value: 'bw', label: 'Black & white' },
 ]
 
-export type ReelZoomStyle = 'zoom_in' | 'zoom_out' | 'none'
+export type ReelZoomStyle = 'zoom_in' | 'zoom_out' | 'pan_left' | 'pan_right' | 'none'
 export const REEL_ZOOM_STYLES: { value: ReelZoomStyle; label: string }[] = [
   { value: 'zoom_in', label: 'Zoom in' },
   { value: 'zoom_out', label: 'Zoom out' },
-  { value: 'none', label: 'No zoom' },
+  { value: 'pan_left', label: 'Pan left' },
+  { value: 'pan_right', label: 'Pan right' },
+  { value: 'none', label: 'No motion' },
 ]
 
 // Every crossfade transition ffmpeg's xfade filter supports - mirrors
@@ -159,6 +237,16 @@ export interface Post {
   reel_image_text_layers: ReelTextLayer[][] | null
   reel_image_color_filters: string[] | null
   reel_warning: string | null
+  reel_template: string | null
+  // Per-clip template overrides (same order as reel_source_images).
+  reel_clip_templates: (string | null)[] | null
+  reel_brand_color: string
+  reel_title_text: string | null
+  reel_logo_url: string | null
+  reel_logo_x: number
+  reel_logo_y: number
+  reel_logo_scale: number
+  reel_ctas: ReelCta[] | null
   platform: Platform | null
   social_account_id: string | null
   social_account_name: string | null
@@ -231,6 +319,7 @@ export interface PostFormInput {
   reel_images?: File[]
   use_ai_video?: boolean
   reel_target_seconds?: number
+  reel_template?: string | null
 }
 
 function toFormData(input: PostFormInput): FormData {
@@ -247,6 +336,7 @@ function toFormData(input: PostFormInput): FormData {
     }
     form.append('use_ai_video', String(input.use_ai_video ?? false))
     if (input.reel_target_seconds) form.append('reel_target_seconds', String(input.reel_target_seconds))
+    if (input.reel_template) form.append('reel_template', input.reel_template)
   } else if (input.media) {
     form.append('media', input.media)
   }
@@ -330,6 +420,23 @@ export interface RegenerateReelInput {
   textLayers?: ReelTextLayer[]
   imageTextLayers?: ReelTextLayer[][]
   imageColorFilters?: string[]
+  // Template id, or '' for none. Brand fields: '' clears.
+  template?: string
+  brandColor?: string
+  titleText?: string
+  logo?: File | null
+  removeLogo?: boolean
+  logoX?: number
+  logoY?: number
+  logoScale?: number
+  // Clip indices in the current (pre-reorder) order, like imageOrder.
+  ctas?: ReelCta[]
+  // Clips to add - they take indices n, n+1, ... after the post's current
+  // n clips, in every per-image field and in imageOrder. A clip (old or
+  // new) left out of imageOrder is removed from the reel.
+  newClips?: File[]
+  // Per-clip template ids, same indexing as imageOrder; '' = reel's template.
+  clipTemplates?: string[]
 }
 
 // Re-renders a reel draft's video from its original source images (image
@@ -356,7 +463,75 @@ export async function regenerateReel(id: string, input: RegenerateReelInput): Pr
   if (input.textLayers) form.append('text_layers', JSON.stringify(input.textLayers))
   if (input.imageTextLayers) form.append('image_text_layers', JSON.stringify(input.imageTextLayers))
   if (input.imageColorFilters) form.append('image_color_filters', input.imageColorFilters.join(','))
+  if (input.template !== undefined) form.append('template', input.template)
+  if (input.brandColor !== undefined) form.append('brand_color', input.brandColor)
+  if (input.titleText !== undefined) form.append('title_text', input.titleText)
+  if (input.logo) form.append('logo', input.logo)
+  if (input.removeLogo) form.append('remove_logo', 'true')
+  if (input.logoX !== undefined) form.append('logo_x', String(input.logoX))
+  if (input.logoY !== undefined) form.append('logo_y', String(input.logoY))
+  if (input.logoScale !== undefined) form.append('logo_scale', String(input.logoScale))
+  if (input.ctas) form.append('ctas', JSON.stringify(input.ctas))
+  for (const clip of input.newClips ?? []) form.append('new_clips', clip)
+  if (input.clipTemplates) form.append('clip_templates', input.clipTemplates.map((t) => t || 'none').join(','))
   const res = await api.post<Post>(`/posts/${id}/regenerate`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return res.data
+}
+
+// Mirrors backend/app/services/reel_templates.py - the live preview draws
+// each template's graphics from these same fields.
+export interface ReelTemplate {
+  id: string
+  name: string
+  description: string
+  transition: string
+  transitions?: string[]
+  zoom_style: ReelZoomStyle
+  color_filter: string
+  hook_seconds?: number
+  hook_style?: 'bold' | 'elegant'
+  letterbox?: boolean
+  frame?: boolean
+  // Rhythm templates: these cycle across clips by on-screen position, and
+  // videos get cut to the `durations` pattern when `cut_videos` is set.
+  zoom_styles?: ReelZoomStyle[]
+  durations?: number[]
+  cut_videos?: boolean
+  // Transition length in seconds (default 1).
+  xfade?: number
+  intro_card?: boolean
+  outro_card?: boolean
+}
+
+// Mirrors reel_templates.py's slot_settings: what a template gives the clip
+// at on-screen position `pos`.
+export function templateSlot(template: ReelTemplate, pos: number) {
+  const pick = <T,>(values: T[] | undefined, fallback: T) => (values?.length ? values[pos % values.length] : fallback)
+  return {
+    transition: pick(template.transitions, template.transition),
+    zoomStyle: pick(template.zoom_styles, template.zoom_style),
+    duration: template.durations?.length ? template.durations[pos % template.durations.length] : null,
+  }
+}
+
+export async function listReelTemplates(): Promise<ReelTemplate[]> {
+  const res = await api.get<ReelTemplate[]>('/posts/reel-templates')
+  return res.data
+}
+
+export interface AIEditResult {
+  post: Post
+  reply: string
+  // Setting names the AI changed - empty means nothing was re-rendered.
+  changed: string[]
+}
+
+export async function aiEditReel(id: string, instruction: string): Promise<AIEditResult> {
+  const form = new FormData()
+  form.append('instruction', instruction)
+  const res = await api.post<AIEditResult>(`/posts/${id}/ai-edit`, form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
   return res.data

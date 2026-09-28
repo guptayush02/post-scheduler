@@ -8,12 +8,13 @@ from beanie.operators import Set
 
 from app.core.config import settings
 from app.core.crypto import decrypt_token
-from app.core.media import media_url_path
+from app.core.media import media_url_path, resolve_media_path
 from app.models.post import MediaType, Platform, PostStatus, ScheduledPost
 from app.models.social_account import ConnectionStatus, SocialAccount
 from app.services import facebook
 from app.services.reel_assets import prepare_reel_sources
 from app.services.reel_generator import generate_reel_video
+from app.services.reel_templates import apply_template, get_template
 from app.services.token_refresh import refresh_due_accounts
 
 logger = logging.getLogger("scheduler.worker")
@@ -25,20 +26,30 @@ class PublishError(Exception):
     pass
 
 
+def _caption_for_publish(post: ScheduledPost) -> str:
+    """The post text as published: the caption, plus the reel's call-to-
+    action links (a video can't carry a clickable link itself)."""
+    lines = [f"{cta['text']}: {cta['link']}" for cta in post.reel_ctas or [] if cta.get("link")]
+    if not lines:
+        return post.caption
+    return post.caption.rstrip() + "\n\n" + "\n".join(dict.fromkeys(lines))
+
+
 async def _publish_to_facebook(post: ScheduledPost, account: SocialAccount) -> str:
     page_token = decrypt_token(account.page_access_token_encrypted)
+    caption = _caption_for_publish(post)
 
     try:
         if post.media_type == MediaType.image and post.media_path:
             result = await facebook.publish_page_photo(
-                account.fb_page_id, page_token, post.caption, post.media_path
+                account.fb_page_id, page_token, caption, post.media_path
             )
         elif post.media_type == MediaType.video and post.media_path:
             result = await facebook.publish_page_video(
-                account.fb_page_id, page_token, post.caption, post.media_path
+                account.fb_page_id, page_token, caption, post.media_path
             )
         else:
-            result = await facebook.publish_page_feed(account.fb_page_id, page_token, post.caption)
+            result = await facebook.publish_page_feed(account.fb_page_id, page_token, caption)
     except facebook.FacebookAPIError as exc:
         if exc.is_auth_error:
             account.status = ConnectionStatus.needs_reauth
@@ -70,7 +81,7 @@ async def _publish_to_instagram(post: ScheduledPost, account: SocialAccount) -> 
         media_id = await facebook.publish_to_instagram(
             account.instagram_business_account_id,
             page_token,
-            post.caption,
+            _caption_for_publish(post),
             media_url,
             is_video=post.media_type == MediaType.video,
         )
@@ -155,6 +166,14 @@ async def poll_due_posts() -> None:
             await post.save()
 
 
+def _reel_sources_on_this_machine(post: ScheduledPost) -> bool:
+    """Local dev and production can share one database while each keeps
+    uploads on its own disk, so each must only render reels whose files it
+    actually has - otherwise they steal each other's jobs and fail with
+    "file does not exist"."""
+    return all(resolve_media_path(p).is_file() for p in post.reel_source_images or [])
+
+
 async def poll_pending_reels() -> None:
     # Runs entirely server-side on this interval regardless of whether the
     # user has the compose page open - generation is never tied to a
@@ -164,6 +183,10 @@ async def poll_pending_reels() -> None:
     ).to_list()
 
     for post in pending:
+        if not _reel_sources_on_this_machine(post):
+            logger.debug("Skipping reel %s: its source files aren't on this machine", post.id)
+            continue
+
         # Same atomic-claim pattern as poll_due_posts, so an overlapping run
         # (or a second backend instance) never generates the same post twice.
         claim = await ScheduledPost.find_one(
@@ -188,6 +211,10 @@ async def poll_pending_reels() -> None:
             if post.reel_ai_pending:
                 logger.info("Preparing reel footage for post %s", post.id)
                 asset_warnings = await prepare_reel_sources(post)
+                # A template picked before the clips existed (text-only
+                # reel) still needs its per-clip rhythm applied.
+                if post.reel_template and not post.reel_image_transitions:
+                    await apply_template(post, post.reel_template)
                 # Persist straight away so a failed render (or a regenerate)
                 # reuses this footage rather than generating/billing it again.
                 post.reel_ai_pending = False
@@ -228,9 +255,30 @@ async def poll_pending_reels() -> None:
                 color_filters=(
                     post.reel_image_color_filters
                     if post.reel_image_color_filters and len(post.reel_image_color_filters) == n
+                    # A text-only reel picks its template before its images
+                    # exist, so fall back to the template's grade.
+                    else [get_template(post.reel_template)["color_filter"]] * n
+                    if get_template(post.reel_template)
                     else None
                 ),
                 text_layers=post.reel_text_layers,
+                template_id=post.reel_template,
+                brand={
+                    "color": post.reel_brand_color,
+                    "title": post.reel_title_text,
+                    # Outro card text: the first call to action.
+                    "outro": (post.reel_ctas or [{}])[0].get("text"),
+                    "logo_path": post.reel_logo_path,
+                    "logo_x": post.reel_logo_x,
+                    "logo_y": post.reel_logo_y,
+                    "logo_scale": post.reel_logo_scale,
+                },
+                ctas=post.reel_ctas,
+                clip_templates=(
+                    post.reel_clip_templates
+                    if post.reel_clip_templates and len(post.reel_clip_templates) == n
+                    else None
+                ),
                 image_text_layers=(
                     post.reel_image_text_layers
                     if post.reel_image_text_layers and len(post.reel_image_text_layers) == n

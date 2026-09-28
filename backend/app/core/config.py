@@ -65,6 +65,20 @@ class Settings(BaseSettings):
     # instead of silently failing.
     public_base_url: str = ""
 
+    # "Edit with AI" on the reel preview: any OpenAI-compatible chat API.
+    # Defaults to Hugging Face's router with HF_TOKEN; e.g. Google Gemini's
+    # free tier works with base URL
+    # https://generativelanguage.googleapis.com/v1beta/openai, a Gemini API
+    # key and model "gemini-2.0-flash".
+    ai_edit_base_url: str = "https://router.huggingface.co/v1"
+    ai_edit_api_key: str = ""
+    ai_edit_model: str = "meta-llama/Llama-3.1-8B-Instruct"
+
+    # Reel output size. 720x1280 keeps rendering within a small server
+    # (Fly shared-cpu-1x, 1GB) - 1080x1920 is ~2.25x the CPU and memory.
+    reel_width: int = 720
+    reel_height: int = 1280
+
     # Hugging Face Inference Providers - optional AI footage for reels. With
     # no token, reels still generate (title cards / uploaded media only).
     # Free accounts get a small monthly credit; a 402 from HF means it ran

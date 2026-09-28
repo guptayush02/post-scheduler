@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,36 +10,35 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.media import media_url_path
-from app.services import hf_media
+from app.services import ai_editor, hf_media
+from app.services.reel_templates import REEL_TEMPLATES, apply_template, get_template, public_templates
+
+REEL_TEMPLATE_IDS = list(REEL_TEMPLATES)
 from app.models.post import MediaType, Platform, PostStatus, ScheduledPost
 from app.services.reel_generator import (
     COLOR_FILTERS,
-    DEFAULT_TEXT_COLOR,
-    DEFAULT_TEXT_POSITION,
-    DEFAULT_FONT_SIZE,
     DEFAULT_TRANSITION,
     DEFAULT_ZOOM_STYLE,
-    MAX_FONT_SIZE,
     MAX_IMAGE_SECONDS,
-    MAX_TEXT_LAYERS,
-    MIN_FONT_SIZE,
     MIN_IMAGE_SECONDS,
-    TEXT_POSITIONS,
     XFADE_TRANSITIONS,
     ZOOM_STYLES,
 )
+from app.services.reel_text import MAX_CTAS, MAX_TEXT_LAYERS, normalize_ctas, normalize_text_layers, public_fonts
 from app.models.social_account import SocialAccount
 from app.models.user import User
-from app.schemas.post import PaginatedPosts, PostResponse
+from app.schemas.post import AIEditResponse, PaginatedPosts, PostResponse
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".aac", ".ogg"}
+# .webm/.ogg are what browsers record voiceovers in (Chrome/Firefox);
+# Safari records .m4a.
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".webm", ".opus"}
 
 # Zero is fine: a text-only reel gets AI footage or title cards instead.
-MAX_REEL_SOURCES = 10
+MAX_REEL_SOURCES = 20
 MIN_REEL_SECONDS = 15
 MAX_REEL_SECONDS = 90
 # Bounds for a new reel's length (regenerating allows the wider range above).
@@ -117,34 +117,6 @@ async def _save_audio_upload(user_id: PydanticObjectId, file: UploadFile) -> str
     return str(dest.as_posix())
 
 
-def _clean_text_layer(raw: object) -> dict:
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Each text layer must be an object")
-
-    text = str(raw.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A text layer can't be empty")
-
-    try:
-        font_size = int(raw.get("font_size") or DEFAULT_FONT_SIZE)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid font_size")
-
-    position = str(raw.get("position") or DEFAULT_TEXT_POSITION)
-    if position not in TEXT_POSITIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"position must be one of {', '.join(TEXT_POSITIONS)}",
-        )
-
-    return {
-        "text": text,
-        "font_size": max(MIN_FONT_SIZE, min(font_size, MAX_FONT_SIZE)),
-        "color": str(raw.get("color") or DEFAULT_TEXT_COLOR),
-        "position": position,
-    }
-
-
 def _parse_text_layers(raw: str, field_name: str) -> list[dict] | None:
     """Parses a JSON array of text layers. Empty string means "not sent"
     (keep whatever is stored); "[]" means the user cleared all layers.
@@ -162,7 +134,8 @@ def _parse_text_layers(raw: str, field_name: str) -> list[dict] | None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"At most {MAX_TEXT_LAYERS} text layers are allowed",
         )
-    return [_clean_text_layer(item) for item in parsed]
+    # Empty layers are dropped; bad values fall back to defaults.
+    return normalize_text_layers(parsed)
 
 
 async def _resolve_social_account(
@@ -212,6 +185,15 @@ def _post_response(post: ScheduledPost, account_name: str | None) -> PostRespons
         reel_image_text_layers=post.reel_image_text_layers,
         reel_image_color_filters=post.reel_image_color_filters,
         reel_warning=post.reel_warning,
+        reel_template=post.reel_template,
+        reel_clip_templates=post.reel_clip_templates,
+        reel_brand_color=post.reel_brand_color,
+        reel_title_text=post.reel_title_text,
+        reel_logo_url=media_url_path(post.reel_logo_path) if post.reel_logo_path else None,
+        reel_logo_x=post.reel_logo_x,
+        reel_logo_y=post.reel_logo_y,
+        reel_logo_scale=post.reel_logo_scale,
+        reel_ctas=post.reel_ctas,
         platform=post.platform,
         social_account_id=str(post.social_account_id) if post.social_account_id else None,
         social_account_name=account_name,
@@ -240,6 +222,23 @@ async def _get_owned_post(post_id: str, user: User) -> ScheduledPost:
     return post
 
 
+async def _account_name(post: ScheduledPost) -> str | None:
+    if not post.social_account_id:
+        return None
+    account = await SocialAccount.get(post.social_account_id)
+    return account.fb_page_name if account else None
+
+
+@router.get("/reel-templates")
+async def reel_templates(current_user: User = Depends(get_current_user)):
+    return public_templates()
+
+
+@router.get("/reel-fonts")
+async def reel_fonts(current_user: User = Depends(get_current_user)):
+    return public_fonts()
+
+
 @router.post("", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
 async def create_post(
     caption: str = Form(...),
@@ -252,6 +251,7 @@ async def create_post(
     reel_images: list[UploadFile] = File(default=[]),
     use_ai_video: bool = Form(default=False),
     reel_target_seconds: float = Form(default=45.0),
+    reel_template: str | None = Form(default=None),
     current_user: User = Depends(get_current_user),
 ):
     """With generate_reel, `reel_images` may hold 0-10 images and/or videos
@@ -301,6 +301,11 @@ async def create_post(
         scheduled_at=scheduled_at,
         status=post_status,
     )
+    if generate_reel and reel_template:
+        # Source images for a text-only reel don't exist yet (AI/cards
+        # fill them in later), so per-image defaults stay unset there and
+        # the uniform fallback carries the template's look instead.
+        await apply_template(post, reel_template)
     await post.insert()
 
     return _post_response(post, account.fb_page_name if account else None)
@@ -367,11 +372,24 @@ async def regenerate_reel(
     text_layers: str = Form(default=""),
     image_text_layers: str = Form(default=""),
     image_color_filters: str = Form(default=""),
+    template: str | None = Form(default=None),
+    brand_color: str | None = Form(default=None),
+    title_text: str | None = Form(default=None),
+    logo: UploadFile | None = File(default=None),
+    remove_logo: bool = Form(default=False),
+    logo_x: float | None = Form(default=None),
+    logo_y: float | None = Form(default=None),
+    logo_scale: float | None = Form(default=None),
+    ctas: str = Form(default=""),
+    clip_templates: str = Form(default=""),
+    new_clips: list[UploadFile] = File(default=[]),
     current_user: User = Depends(get_current_user),
 ):
-    """Re-runs reel generation for an existing draft against its original
-    source images (optionally reordered), with a new duration and/or a new
-    custom audio track. `transition`/`zoom_style` are the uniform fallback;
+    """Re-runs reel generation for an existing draft against its source
+    clips - optionally reordered, with clips added (`new_clips`, appended
+    after the existing ones in index space: index n, n+1, ...) or removed
+    (left out of `image_order`) - with a new duration and/or a new custom
+    audio track. `transition`/`zoom_style` are the uniform fallback;
     `image_transitions`/`image_zoom_styles`/`image_durations` (one value per
     image, in the *current pre-reorder* order - same indexing as
     `image_order`) let each image get its own zoom, its own transition into
@@ -401,20 +419,33 @@ async def regenerate_reel(
             detail=f"zoom_style must be one of {', '.join(ZOOM_STYLES)}",
         )
 
-    n = len(post.reel_source_images)
+    new_clips = [f for f in new_clips if f.filename]
+    for clip in new_clips:
+        if _media_type_for(clip.filename or "") is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported file type for a clip: {clip.filename}"
+            )
+    n_existing = len(post.reel_source_images)
+    # Index space for everything below: existing clips, then the new ones.
+    n = n_existing + len(new_clips)
 
     if image_order:
         try:
             order = [int(x) for x in image_order.split(",")]
         except ValueError:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image_order")
-        if sorted(order) != list(range(n)):
+        # A subset is fine - clips left out are removed from the reel.
+        if not order or len(set(order)) != len(order) or any(not (0 <= i < n) for i in order):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="image_order must be a permutation of the reel's image indices",
+                detail="image_order must list each kept clip index once",
             )
     else:
         order = list(range(n))
+    if len(order) > MAX_REEL_SOURCES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"A reel can use at most {MAX_REEL_SOURCES} clips"
+        )
 
     def _parse_per_image(raw: str, allowed: dict[str, str] | list[str], field_name: str) -> list[str] | None:
         if not raw:
@@ -445,6 +476,8 @@ async def regenerate_reel(
         new_durations = parsed_durations
 
     new_color_filters = _parse_per_image(image_color_filters, COLOR_FILTERS, "image_color_filters")
+    # Per-clip template ids; "none" (or "") = use the reel's template.
+    new_clip_templates = _parse_per_image(clip_templates, ["", "none", *REEL_TEMPLATE_IDS], "clip_templates")
 
     new_text_layers = _parse_text_layers(text_layers, "text_layers")
 
@@ -470,9 +503,49 @@ async def regenerate_reel(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"At most {MAX_TEXT_LAYERS} text layers per image",
                 )
-            new_image_text_layers.append([_clean_text_layer(item) for item in group])
+            new_image_text_layers.append(normalize_text_layers(group))
 
-    post.reel_source_images = [post.reel_source_images[i] for i in order]
+    # Everything is validated - now save the new clips and apply the order.
+    all_sources = list(post.reel_source_images)
+    for clip in new_clips:
+        path, _ = await _save_upload(current_user.id, clip)
+        all_sources.append(path)
+    for i in set(range(n)) - set(order):
+        Path(all_sources[i]).unlink(missing_ok=True)
+    post.reel_source_images = [all_sources[i] for i in order]
+
+    # Stored per-clip settings only cover the existing clips; give the new
+    # ones defaults so the "keep what's stored" fallbacks below line up.
+    if new_clips:
+        extra = len(new_clips)
+        for attr, default in (
+            ("reel_image_transitions", post.reel_transition),
+            ("reel_image_zoom_styles", post.reel_zoom_style),
+            ("reel_image_durations", 3.0),
+            ("reel_image_text_layers", []),
+            ("reel_image_color_filters", "none"),
+            ("reel_clip_templates", None),
+        ):
+            stored = getattr(post, attr)
+            if stored and len(stored) == n_existing:
+                setattr(post, attr, list(stored) + [default] * extra)
+
+    # CTAs arrive indexed by the pre-reorder clip order (like every other
+    # per-image field); re-point them at the clips' new positions. "" = not
+    # sent (keep, still re-pointed); "[]" = remove all.
+    if ctas:
+        try:
+            parsed_ctas = json.loads(ctas)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ctas JSON")
+        if not isinstance(parsed_ctas, list) or len(parsed_ctas) > MAX_CTAS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"ctas must be a list of at most {MAX_CTAS}"
+            )
+        post.reel_ctas = normalize_ctas(parsed_ctas, n)
+    if post.reel_ctas:
+        # A CTA whose clip was removed moves to the first clip.
+        post.reel_ctas = [{**cta, "clip": order.index(cta["clip"]) if cta["clip"] in order else 0} for cta in post.reel_ctas]
 
     if new_zoom_styles is not None:
         post.reel_image_zoom_styles = [new_zoom_styles[i] for i in order]
@@ -494,6 +567,12 @@ async def regenerate_reel(
     elif post.reel_image_text_layers and len(post.reel_image_text_layers) == n:
         post.reel_image_text_layers = [post.reel_image_text_layers[i] for i in order]
 
+    if new_clip_templates is not None:
+        picked = [t if t in REEL_TEMPLATES else None for t in (new_clip_templates[i] for i in order)]
+        post.reel_clip_templates = picked if any(picked) else None
+    elif post.reel_clip_templates and len(post.reel_clip_templates) == n:
+        post.reel_clip_templates = [post.reel_clip_templates[i] for i in order]
+
     if new_color_filters is not None:
         post.reel_image_color_filters = [new_color_filters[i] for i in order]
     elif post.reel_image_color_filters and len(post.reel_image_color_filters) == n:
@@ -505,6 +584,31 @@ async def regenerate_reel(
     post.reel_target_seconds = max(MIN_REEL_SECONDS, min(target_seconds, MAX_REEL_SECONDS))
     post.reel_transition = transition
     post.reel_zoom_style = zoom_style
+
+    # Template/brand: None = not sent (keep), "" = clear. The per-image
+    # look was already sent explicitly above, so only the template id is
+    # stored here - not its defaults, which would undo those tweaks.
+    if template is not None:
+        post.reel_template = template if get_template(template) else None
+    if brand_color is not None and re.fullmatch(r"#[0-9a-fA-F]{6}", brand_color):
+        post.reel_brand_color = brand_color
+    if title_text is not None:
+        post.reel_title_text = title_text.strip()[:120] or None
+    if logo_x is not None:
+        post.reel_logo_x = max(0.0, min(logo_x, 1.0))
+    if logo_y is not None:
+        post.reel_logo_y = max(0.0, min(logo_y, 1.0))
+    if logo_scale is not None:
+        post.reel_logo_scale = max(0.05, min(logo_scale, 0.6))
+    if remove_logo and post.reel_logo_path:
+        Path(post.reel_logo_path).unlink(missing_ok=True)
+        post.reel_logo_path = None
+    elif logo is not None and logo.filename:
+        if _media_type_for(logo.filename) != MediaType.image:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The logo must be an image")
+        if post.reel_logo_path:
+            Path(post.reel_logo_path).unlink(missing_ok=True)
+        post.reel_logo_path, _ = await _save_upload(current_user.id, logo)
 
     if remove_audio:
         if post.reel_audio_path:
@@ -549,6 +653,80 @@ async def regenerate_reel(
         account = await SocialAccount.get(post.social_account_id)
         account_name = account.fb_page_name if account else None
     return _post_response(post, account_name)
+
+
+@router.post("/{post_id}/ai-edit", response_model=AIEditResponse)
+async def ai_edit_reel(
+    post_id: str,
+    instruction: str = Form(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Applies a plain-language change ("make it faster", "add 'Sale' at
+    the top") to a reel draft's settings, then re-renders it."""
+    post = await _get_owned_post(post_id, current_user)
+
+    if not post.reel_source_images:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This post isn't a reel")
+    if post.status not in (PostStatus.draft, PostStatus.generation_failed):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Wait for the current generation to finish first",
+        )
+    if not instruction.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Say what you'd like changed")
+
+    n = len(post.reel_source_images)
+    current = {
+        "template": post.reel_template or "none",
+        "transition": post.reel_transition,
+        "zoom_style": post.reel_zoom_style,
+        "color_filters": post.reel_image_color_filters or ["none"] * n,
+        "target_seconds": post.reel_target_seconds,
+        "clip_count": n,
+        "text_layers": post.reel_text_layers,
+        "title_text": post.reel_title_text,
+        "ctas": post.reel_ctas or [],
+        "brand_color": post.reel_brand_color,
+        "caption": post.caption[:500],
+    }
+    try:
+        patch, reply = await ai_editor.propose_edit(instruction, current)
+    except ai_editor.AIEditError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    if "template" in patch:
+        await apply_template(post, patch["template"])
+    if "transition" in patch:
+        post.reel_transition = patch["transition"]
+        post.reel_image_transitions = [patch["transition"]] * n
+    if "zoom_style" in patch:
+        post.reel_zoom_style = patch["zoom_style"]
+        post.reel_image_zoom_styles = [patch["zoom_style"]] * n
+    if "color_filter" in patch:
+        post.reel_image_color_filters = [patch["color_filter"]] * n
+    if "target_seconds" in patch:
+        post.reel_target_seconds = patch["target_seconds"]
+        post.reel_image_durations = None  # re-split evenly across the new length
+    if "text_layers" in patch:
+        post.reel_text_layers = patch["text_layers"]
+    if "title_text" in patch:
+        post.reel_title_text = patch["title_text"]
+    if "ctas" in patch:
+        post.reel_ctas = normalize_ctas(patch["ctas"], n)
+    if "brand_color" in patch:
+        post.reel_brand_color = patch["brand_color"]
+
+    if patch:
+        post.status = PostStatus.generating_video
+        post.error_message = None
+        post.updated_at = datetime.now(timezone.utc)
+        await post.save()
+
+    return AIEditResponse(
+        post=_post_response(post, await _account_name(post)),
+        reply=reply,
+        changed=sorted(patch),
+    )
 
 
 @router.get("", response_model=PaginatedPosts)
@@ -657,4 +835,6 @@ async def delete_post(post_id: str, current_user: User = Depends(get_current_use
         Path(post.reel_audio_path).unlink(missing_ok=True)
     if post.reel_voice_audio_path:
         Path(post.reel_voice_audio_path).unlink(missing_ok=True)
+    if post.reel_logo_path:
+        Path(post.reel_logo_path).unlink(missing_ok=True)
     await post.delete()

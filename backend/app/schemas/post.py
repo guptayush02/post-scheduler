@@ -44,6 +44,15 @@ class PostResponse(BaseModel):
     reel_image_text_layers: list[list[dict]] | None
     reel_image_color_filters: list[str] | None
     reel_warning: str | None
+    reel_template: str | None
+    reel_clip_templates: list[str | None] | None
+    reel_brand_color: str
+    reel_title_text: str | None
+    reel_logo_url: str | None
+    reel_logo_x: float
+    reel_logo_y: float
+    reel_logo_scale: float
+    reel_ctas: list[dict] | None
     platform: Platform | None
     social_account_id: str | None
     social_account_name: str | None
@@ -65,3 +74,11 @@ class PaginatedPosts(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+class AIEditResponse(BaseModel):
+    post: PostResponse
+    # The AI's one-line summary of what it changed, for the user.
+    reply: str
+    # Setting names that changed; empty means nothing was re-rendered.
+    changed: list[str]

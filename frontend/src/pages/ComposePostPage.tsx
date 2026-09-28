@@ -5,12 +5,14 @@ import {
   getAiStatus,
   getPost,
   isVideoUrl,
+  listReelTemplates,
   listSocialAccounts,
   parseApiDate,
   updatePost,
   type AiStatus,
   type Platform,
   type PostStatus,
+  type ReelTemplate,
   type SocialAccount,
 } from '../api/client'
 
@@ -25,7 +27,7 @@ function toIsoString(datetimeLocalValue: string): string {
   return new Date(datetimeLocalValue).toISOString()
 }
 
-const MAX_REEL_FILES = 10
+const MAX_REEL_FILES = 20 // must match posts.py's MAX_REEL_SOURCES
 const MIN_REEL_SECONDS = 30
 const MAX_REEL_SECONDS = 60
 
@@ -59,6 +61,8 @@ export default function ComposePostPage() {
   const [useAiVideo, setUseAiVideo] = useState(true)
   const [reelSeconds, setReelSeconds] = useState(45)
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null)
+  const [templates, setTemplates] = useState<ReelTemplate[]>([])
+  const [reelTemplate, setReelTemplate] = useState('')
   const [existingMediaPath, setExistingMediaPath] = useState<string | null>(null)
   const [postStatus, setPostStatus] = useState<PostStatus | null>(null)
   const [postErrorMessage, setPostErrorMessage] = useState<string | null>(null)
@@ -69,6 +73,7 @@ export default function ComposePostPage() {
   useEffect(() => {
     const loadAccounts = listSocialAccounts().then(setAccounts)
     getAiStatus().then(setAiStatus).catch(() => setAiStatus(null))
+    listReelTemplates().then(setTemplates).catch(() => setTemplates([]))
     const loadPost = id ? getPost(id) : Promise.resolve(null)
 
     Promise.all([loadAccounts, loadPost])
@@ -132,13 +137,17 @@ export default function ComposePostPage() {
         reel_images: reelImages,
         use_ai_video: useAiVideo && Boolean(aiStatus?.enabled),
         reel_target_seconds: reelSeconds,
+        reel_template: reelTemplate || null,
       }
       if (isEdit && id) {
         await updatePost(id, input)
+        navigate('/dashboard')
       } else {
-        await createPost(input)
+        const created = await createPost(input)
+        // A reel renders in the background - its preview page shows it
+        // arriving and is where it gets tweaked and scheduled.
+        navigate(mode === 'reel' ? `/posts/${created.id}/preview` : '/dashboard')
       }
-      navigate('/dashboard')
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? 'Failed to save post')
     } finally {
@@ -171,14 +180,20 @@ export default function ComposePostPage() {
       {postStatus === 'draft' && (
         <p className="mt-2 rounded-md bg-indigo-50 px-3 py-2 text-sm text-indigo-800">
           The reel video is ready — edit the caption if you want, pick a date &amp; time below and
-          save to schedule it. You can also use <strong>Preview</strong> on the dashboard to watch
-          it first.
+          save to schedule it. You can also{' '}
+          <Link to={`/posts/${id}/preview`} className="font-medium underline">
+            open the preview
+          </Link>{' '}
+          to watch and tweak it first.
         </p>
       )}
       {postStatus === 'generation_failed' && (
         <p className="mt-2 rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
           Reel generation failed{postErrorMessage ? `: ${postErrorMessage}` : ''}. Open{' '}
-          <strong>Preview</strong> on the dashboard to change the settings and retry.
+          <Link to={`/posts/${id}/preview`} className="font-medium underline">
+            the preview
+          </Link>{' '}
+          to change the settings and retry.
         </p>
       )}
       <fieldset disabled={isBlocked} className="contents">
@@ -308,7 +323,8 @@ export default function ComposePostPage() {
             <p className={`mt-1 text-xs ${!reelImageCountValid ? 'text-red-600' : 'text-gray-500'}`}>
               Optional: up to {MAX_REEL_FILES} images and/or videos ({reelImages.length} selected).
               Leave empty to build the reel from the caption alone. Images get zoom/pan, videos are
-              looped or trimmed to fit, with crossfades and your caption burned in.
+              looped or trimmed to fit, with crossfades. Your caption stays in the post - add text onto
+              the video itself from the preview page.
             </p>
             {reelImages.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
@@ -332,6 +348,23 @@ export default function ComposePostPage() {
                 )}
               </div>
             )}
+
+            <label className="mt-3 block text-xs font-medium text-gray-700">Template</label>
+            <select
+              value={reelTemplate}
+              onChange={(e) => setReelTemplate(e.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+            >
+              <option value="">No template</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name} — {t.description}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              You can switch templates later on the preview page, with a live preview.
+            </p>
 
             <label className="mt-3 block text-xs font-medium text-gray-700">
               Length: {reelSeconds}s

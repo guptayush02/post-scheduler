@@ -10,9 +10,11 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-# ffmpeg assembles reel videos from images; fonts-dejavu-core provides the
-# font used to burn the caption text onto them.
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
+# ffmpeg assembles reel videos; fonts-dejavu-core is the fallback font for
+# title cards. libraqm0 lets Pillow shape complex scripts, so Hindi text
+# layers render with correct conjuncts and matras (reel text fonts are
+# bundled in backend/app/assets/fonts).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core libraqm0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .

@@ -142,6 +142,8 @@ async def text_to_video(prompt: str, out_path: str) -> str:
 
 async def image_to_video(image_path: str, prompt: str, out_path: str) -> str:
     async def via_space():
+        if not Path(image_path).is_file():
+            raise HFMediaError(f"Image not found: {image_path}")
         path = await _run_space(
             settings.hf_space_image_to_video,
             "/generate_video",

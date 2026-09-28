@@ -7,6 +7,7 @@ import LoginPage from './pages/LoginPage'
 import VerifyEmailPage from './pages/VerifyEmailPage'
 import DashboardPage from './pages/DashboardPage'
 import ComposePostPage from './pages/ComposePostPage'
+import PostPreviewPage from './pages/PostPreviewPage'
 import ConnectionsPage from './pages/ConnectionsPage'
 import PrivacyPolicyPage from './pages/PrivacyPolicyPage'
 import TermsOfServicePage from './pages/TermsOfServicePage'
@@ -50,6 +51,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <ComposePostPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/posts/:id/preview"
+            element={
+              <ProtectedRoute>
+                <PostPreviewPage />
               </ProtectedRoute>
             }
           />

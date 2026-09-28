@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.media import resolve_media_path
 from app.models.post import ScheduledPost
 from app.services import hf_media
 from app.services.reel_generator import is_video_path, render_title_cards
@@ -51,7 +52,7 @@ async def prepare_reel_sources(post: ScheduledPost) -> list[str]:
         if not hf_media.is_enabled():
             warnings.append("AI video skipped: HF_TOKEN isn't set on the server")
         else:
-            first_image = next((p for p in sources if not is_video_path(p)), None)
+            first_image = next((str(resolve_media_path(p)) for p in sources if not is_video_path(p)), None)
             for i in range(max(0, settings.hf_video_clips)):
                 out = new_path(".mp4")
                 try:
@@ -61,14 +62,15 @@ async def prepare_reel_sources(post: ScheduledPost) -> list[str]:
                         # image-to-video, so fall back to text-to-video.
                         try:
                             await hf_media.image_to_video(first_image, prompt, out)
-                        except hf_media.HFMediaError as exc:
+                        except Exception as exc:
                             logger.info("image-to-video failed for post %s, trying text-to-video: %s", post.id, exc)
                             await hf_media.text_to_video(prompt, out)
                     else:
                         style = _SCENE_STYLES[i % len(_SCENE_STYLES)]
                         await hf_media.text_to_video(f"{prompt}. {style}", out)
                     clips.append(out)
-                except hf_media.HFMediaError as exc:
+                except Exception as exc:
+                    # Never let AI footage fail the reel - it's optional.
                     Path(out).unlink(missing_ok=True)
                     warnings.append(f"AI video skipped: {exc}")
                     break
@@ -81,18 +83,16 @@ async def prepare_reel_sources(post: ScheduledPost) -> list[str]:
                 try:
                     await hf_media.text_to_image(f"{prompt}. {_SCENE_STYLES[i % len(_SCENE_STYLES)]}", out)
                     stills.append(out)
-                except hf_media.HFMediaError as exc:
+                except Exception as exc:
                     Path(out).unlink(missing_ok=True)
                     warnings.append(f"AI images skipped: {exc}")
                     break
 
         if not stills:
             # Even with an AI clip, a lone ~5s clip looped for 45s looks
-            # broken - pad it out with cards.
-            stills = render_title_cards(post.caption, str(user_dir))
-            # The cards already carry the caption - don't burn it in twice.
-            if post.reel_text_layers is None:
-                post.reel_text_layers = []
+            # broken - pad it out with plain backgrounds the user can put
+            # their own text on from the preview page.
+            stills = render_title_cards(str(user_dir))
         sources = stills
 
     post.reel_source_images = clips + sources

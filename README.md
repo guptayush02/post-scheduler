@@ -235,7 +235,7 @@ fly.toml       # Fly.io app config (volume mount, always-on machine, env)
   new time, not an edit of what's already live (neither platform supports
   scheduling edits after the fact).
 - "Generate reel" saves a `draft` post and runs FFmpeg (Ken Burns zoom/pan +
-  crossfades + a burned-in caption, from 0–10 uploaded images and/or videos)
+  crossfades, from 0–10 uploaded images and/or videos)
   in the background via the scheduler - generation is not tied to the compose page
   staying open. Once the video's ready the draft stays a draft until the user
   previews it and picks a schedule time from the dashboard (`POST
@@ -261,10 +261,53 @@ fly.toml       # Fly.io app config (volume mount, always-on machine, env)
   spends the account's daily ZeroGPU minutes), then billed Inference
   Providers.
   AI footage is generated once and saved as reel segments, so regenerating
-  from the Preview dialog doesn't bill it again. HF failures (e.g. a 402 when
+  from the preview page doesn't bill it again. HF failures (e.g. a 402 when
   the free monthly credit is gone) never fail the reel - they show up as a
-  warning in the Preview dialog instead.
-- A ready reel draft can be edited from the dashboard's **Preview** dialog
+  warning on the preview page instead.
+- **Text on the video** is only what the user adds on the preview page -
+  the post caption is never burned in. Layers have a font (bundled Google
+  Fonts in `backend/app/assets/fonts`, also served at `/reel-fonts` for the
+  preview), size, colour, optional box, and an x/y position set by dragging
+  in the live preview; the logo is dragged/resized the same way. Text is
+  drawn with Pillow (`reel_chrome.py`), not ffmpeg's drawtext; Hindi needs
+  `libraqm` (installed in the Docker image) for correct shaping.
+- **Calls to action** (`reel_ctas`, shape in `reel_text.py`) are separate
+  from templates: animated buttons (pop / pop + pulse / slide up / fade)
+  placed on any clip, any number of seconds in, for any duration (they can
+  run over later clips), dragged into position in the preview. Their frames
+  are drawn with Pillow (`reel_chrome.render_cta_frames`) and overlaid on
+  the whole-reel timeline in the final pass, which then re-encodes the video
+  once (it's a plain stream copy without CTAs). Links can't be clickable in
+  a video, so each CTA's link is appended to the post text on publish
+  (`scheduler._caption_for_publish`).
+- **Templates** (`backend/app/services/reel_templates.py`): Bold Hook,
+  Cinematic, Brand Frame, Fast Cuts, Intro + Outro and Product Showcase.
+  Their graphics (letterbox, frame, CTA bar, hook title, intro/outro cards)
+  are drawn with Pillow in `reel_chrome.py` and laid over each segment, and
+  only ever show text the user typed (the title; the outro card uses the
+  first CTA); brand colour and title are per post. The frontend
+  live preview draws the same layout from `GET /api/posts/reel-templates`.
+- **Rhythm templates** (Swipe Story, Beat Sync, Glitch Pop, Smooth Flow,
+  Circle Reveal, Wipe Montage, Flash Cuts, Dreamy Fade, Fast Cuts) carry a
+  transition sequence, a motion sequence (zooms / pans) and a clip-length
+  pattern that repeat by clip position (`reel_templates.slot_settings` /
+  `apply_template`), plus their own transition length (`xfade`). Videos
+  keep their full length and are cut to the pattern at render
+  (`reel_generator._rhythm_cuts`), so any mix of images and videos falls
+  into the template's rhythm - the reel's length then follows from the
+  pattern and the media, not the 30-60s target.
+- **Per-clip templates**: ticking clips on the preview page and picking a
+  template applies it to just those clips (`reel_clip_templates`, overriding
+  `reel_template`), with its pattern restarting at the first of them - so
+  one reel can switch templates part-way through. Each clip gets its own
+  template's chrome, video cuts and transition length; intro/hook follow
+  the first clip's template and the outro the last's. The live preview can
+  play the whole reel, just the ticked clips, or a single clip.
+- **Edit with AI** (`POST /api/posts/{id}/ai-edit`): a plain-language request
+  is turned into a validated patch of the reel's settings by any
+  OpenAI-compatible chat API (`AI_EDIT_*`, defaults to HF's router), then the
+  reel re-renders.
+- A ready reel draft can be edited on its preview page (`/posts/:id/preview`)
   before it's scheduled, and re-rendered with **Regenerate video** (`POST
   /api/posts/{id}/regenerate`) - nothing re-renders until that button is
   pressed. What's editable:

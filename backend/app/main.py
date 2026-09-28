@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import auth, posts, social
 from app.core.config import settings
 from app.db.mongodb import init_db
+from app.services.reel_text import FONTS_DIR
 from app.services.scheduler import start_scheduler, stop_scheduler
 
 
@@ -38,6 +39,8 @@ app.add_middleware(
 )
 
 app.mount("/uploads", StaticFiles(directory=settings.uploads_dir), name="uploads")
+# Bundled fonts for reel text, so the frontend preview uses the same ones.
+app.mount("/reel-fonts", StaticFiles(directory=FONTS_DIR), name="reel-fonts")
 
 app.include_router(auth.router)
 app.include_router(posts.router)

@@ -73,15 +73,34 @@ class ScheduledPost(Document):
     # fixed target, once set. None until the user customizes an image -
     # reel_target_seconds is then split evenly instead.
     reel_image_durations: list[float] | None = None
-    # Burned-in text. reel_text_layers show for the whole video;
-    # reel_image_text_layers[i] only while image i is on screen (same
-    # order/length as reel_source_images). Each layer is
-    # {text, font_size, color, position}. reel_text_layers stays None until
-    # the user customizes it - the caption is burned in by default.
+    # User-added text on the video (never the caption). reel_text_layers
+    # show for the whole video; reel_image_text_layers[i] only while image i
+    # is on screen (same order/length as reel_source_images). Layer shape:
+    # see services/reel_text.py.
     reel_text_layers: list[dict] | None = None
     reel_image_text_layers: list[list[dict]] | None = None
     # Per-image colour grading preset (same order as reel_source_images).
     reel_image_color_filters: list[str] | None = None
+    # Template (see services/reel_templates.py) and the brand details its
+    # graphics use. The title is only ever what the user typed.
+    reel_template: str | None = None
+    # Per-clip template overrides (same order as reel_source_images; None =
+    # use reel_template) - lets different stretches of one reel use
+    # different templates.
+    reel_clip_templates: list[str | None] | None = None
+    reel_brand_color: str = "#4F46E5"
+    reel_title_text: str | None = None
+    reel_logo_path: str | None = None
+    # Logo centre as a fraction of the frame, and its width as a fraction
+    # of the frame width - set by dragging/resizing it in the preview.
+    reel_logo_x: float = 0.85
+    reel_logo_y: float = 0.08
+    reel_logo_scale: float = 0.16
+    # Animated call-to-action badges, independent of templates - shape in
+    # services/reel_text.py. `clip` indexes reel_source_images. Their links
+    # can't be clickable inside a video, so they're appended to the post
+    # text when publishing (see scheduler).
+    reel_ctas: list[dict] | None = None
     # Non-fatal problem from the last render (e.g. text couldn't be burned
     # in because this server's ffmpeg has no drawtext filter).
     reel_warning: str | None = None

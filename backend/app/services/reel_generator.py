@@ -2,34 +2,37 @@
 of source segments, using FFmpeg. A segment is either a still image (Ken
 Burns zoom/pan) or a video clip (an upload, or AI footage from
 hf_media - fitted onto a blurred copy of itself, looped/trimmed to its slot),
-joined with crossfade transitions and the caption burned in as text.
+joined with crossfade transitions, with the user's own text layers, logo
+and template graphics laid over them (never the post caption).
 """
 
 import asyncio
+from dataclasses import dataclass, field, replace
 import logging
-import os
 import re
-import subprocess
+import shutil
 import tempfile
 import uuid
-from functools import lru_cache
 from pathlib import Path
 
+from app.core.config import settings
 from app.core.media import resolve_media_path
+from app.services.reel_text import normalize_ctas, normalize_text_layers
 
 logger = logging.getLogger("scheduler.reel_generator")
 
-WIDTH = 1080
-HEIGHT = 1920
+WIDTH = settings.reel_width
+HEIGHT = settings.reel_height
+# Text sizes/offsets are authored against a 1920px-tall frame.
+SCALE = HEIGHT / 1920
 FPS = 30
 XFADE_SECONDS = 1.0
 TARGET_TOTAL_SECONDS = 45.0
 FFMPEG_TIMEOUT_SECONDS = 300
-MAX_CAPTION_OVERLAY_CHARS = 200
 # Per-image on-screen duration bounds (before crossfade overlap is
-# subtracted). Must stay above XFADE_SECONDS so a clip never gets
-# entirely eaten by its own crossfade.
-MIN_IMAGE_SECONDS = 2.0
+# subtracted). Clips are also kept at least two transitions long (see
+# min_clip in generate_reel_video), so a crossfade never eats a whole clip.
+MIN_IMAGE_SECONDS = 1.0
 MAX_IMAGE_SECONDS = 60.0
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
@@ -65,10 +68,16 @@ XFADE_TRANSITIONS: list[str] = [
 ]
 DEFAULT_TRANSITION = "fade"
 
-ZOOM_STYLES: dict[str, str] = {
-    "zoom_in": "min(1.0+on*0.0015,1.2)",
-    "zoom_out": "max(1.2-on*0.0015,1.0)",
-    "none": "1.0",
+# Ken Burns motion per still: zoompan (z, x, y) expressions, "{d}" being the
+# clip's frame count. Zooms stay centred; pans drift across a 1.15x crop.
+_CENTER_X = "iw/2-(iw/zoom/2)"
+_CENTER_Y = "ih/2-(ih/zoom/2)"
+ZOOM_STYLES: dict[str, tuple[str, str, str]] = {
+    "zoom_in": ("min(1.0+on*0.0015,1.2)", _CENTER_X, _CENTER_Y),
+    "zoom_out": ("max(1.2-on*0.0015,1.0)", _CENTER_X, _CENTER_Y),
+    "pan_left": ("1.15", "(iw-iw/zoom)*(1-on/{d})", _CENTER_Y),
+    "pan_right": ("1.15", "(iw-iw/zoom)*on/{d}", _CENTER_Y),
+    "none": ("1.0", "0", "0"),
 }
 DEFAULT_ZOOM_STYLE = "zoom_in"
 
@@ -87,24 +96,15 @@ COLOR_FILTERS: dict[str, str] = {
 }
 DEFAULT_COLOR_FILTER = "none"
 
-# Text layers: a 3x3 grid of drawtext (x, y) expressions.
-TEXT_POSITIONS: dict[str, tuple[str, str]] = {
-    "top_left": ("40", "60"),
-    "top_center": ("(w-text_w)/2", "60"),
-    "top_right": ("w-text_w-40", "60"),
-    "middle_left": ("40", "(h-text_h)/2"),
-    "middle_center": ("(w-text_w)/2", "(h-text_h)/2"),
-    "middle_right": ("w-text_w-40", "(h-text_h)/2"),
-    "bottom_left": ("40", "h-text_h-120"),
-    "bottom_center": ("(w-text_w)/2", "h-text_h-120"),
-    "bottom_right": ("w-text_w-40", "h-text_h-120"),
-}
-DEFAULT_TEXT_POSITION = "bottom_center"
-MIN_FONT_SIZE = 16
-MAX_FONT_SIZE = 120
-DEFAULT_FONT_SIZE = 48
-DEFAULT_TEXT_COLOR = "#FFFFFF"
-MAX_TEXT_LAYERS = 5
+# Appended to every segment's chain so all xfade inputs already match
+# exactly. JPEGs decode as full-range and video as limited-range; left
+# mismatched, ffmpeg 7.x auto-inserts a scale filter in front of xfade that
+# drops the frame rate (to 1/0), and xfade then refuses to configure.
+SEGMENT_TAIL = (
+    "scale=out_range=tv:out_color_matrix=bt709,format=yuv420p,"
+    "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709,"
+    f"fps={FPS}"
+)
 
 
 class ReelGenerationError(Exception):
@@ -128,13 +128,13 @@ async def probe_duration(path: str) -> float | None:
         return None
 
 
-async def _default_clip_lens(paths: list[str], target_seconds: float) -> list[float]:
+async def _default_clip_lens(paths: list[str], target_seconds: float, fade: float = XFADE_SECONDS) -> list[float]:
     """Per-segment on-screen seconds when the user hasn't set any. Video
     clips keep their natural length and the stills share whatever is left
     of the target; with no stills, the clips split the target evenly
     (looping or trimming to fit)."""
     n = len(paths)
-    needed = target_seconds + (n - 1) * XFADE_SECONDS
+    needed = target_seconds + (n - 1) * fade
     video_idx = [i for i, p in enumerate(paths) if is_video_path(p)]
     image_count = n - len(video_idx)
 
@@ -162,24 +162,6 @@ _TITLE_CARD_GRADIENTS = [
 ]
 
 
-def _split_caption_for_cards(caption: str, max_cards: int) -> list[str]:
-    text = re.sub(r"\s+", " ", _UNRENDERABLE_TEXT.sub("", caption)).strip()
-    if not text:
-        return [""] * 3
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
-    if len(sentences) < 3:
-        words = text.split()
-        if len(words) >= 9:
-            size = -(-len(words) // 3)
-            sentences = [" ".join(words[i : i + size]) for i in range(0, len(words), size)]
-    if len(sentences) > max_cards:
-        size = -(-len(sentences) // max_cards)
-        sentences = [" ".join(sentences[i : i + size]) for i in range(0, len(sentences), size)]
-    while len(sentences) < 3:
-        sentences.append(sentences[len(sentences) % len(sentences)])
-    return sentences
-
-
 def _wrap_text(draw, text: str, font, max_width: int) -> list[str]:
     lines: list[str] = []
     current = ""
@@ -195,46 +177,23 @@ def _wrap_text(draw, text: str, font, max_width: int) -> list[str]:
     return lines
 
 
-def render_title_cards(caption: str, out_dir: str, max_cards: int = 5) -> list[str]:
-    """Plain gradient cards carrying the caption, split across several
-    cards - the no-AI fallback for a text-only reel. Drawn with Pillow
-    rather than ffmpeg's drawtext, which many ffmpeg builds lack."""
-    from PIL import Image, ImageDraw, ImageFont
+def render_title_cards(out_dir: str, count: int = 3) -> list[str]:
+    """Plain gradient backgrounds - the no-AI fallback for a text-only reel.
+    Deliberately text-free: the caption never goes on the video, only text
+    the user adds on the preview page does."""
+    from PIL import Image, ImageDraw
 
-    font_path = _resolve_font_path()
-    chunks = _split_caption_for_cards(caption, max_cards)
     paths: list[str] = []
-
-    for idx, chunk in enumerate(chunks):
+    for idx in range(count):
         top, bottom = _TITLE_CARD_GRADIENTS[idx % len(_TITLE_CARD_GRADIENTS)]
         image = Image.new("RGB", (WIDTH, HEIGHT))
         draw = ImageDraw.Draw(image)
         for y in range(HEIGHT):
             t = y / (HEIGHT - 1)
-            color = tuple(round(a + (b - a) * t) for a, b in zip(top, bottom))
-            draw.line([(0, y), (WIDTH, y)], fill=color)
-
-        font_size = 84
-        while True:
-            font = (
-                ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default(size=font_size)
-            )
-            lines = _wrap_text(draw, chunk, font, WIDTH - 160)
-            line_height = round(font_size * 1.3)
-            if len(lines) * line_height <= HEIGHT * 0.6 or font_size <= 40:
-                break
-            font_size -= 8
-
-        y = (HEIGHT - len(lines) * line_height) / 2
-        for line in lines:
-            x = (WIDTH - draw.textlength(line, font=font)) / 2
-            draw.text((x, y), line, font=font, fill="white", stroke_width=3, stroke_fill=(0, 0, 0))
-            y += line_height
-
+            draw.line([(0, y), (WIDTH, y)], fill=tuple(round(a + (b - a) * t) for a, b in zip(top, bottom)))
         path = str((Path(out_dir) / f"{uuid.uuid4().hex}.jpg").as_posix())
         image.save(path, "JPEG", quality=92)
         paths.append(path)
-
     return paths
 
 
@@ -245,24 +204,8 @@ def _resolve_font_path() -> str | None:
     return None
 
 
-@lru_cache(maxsize=1)
-def _drawtext_filter_available() -> bool:
-    # Not every ffmpeg build includes libfreetype (e.g. plain `brew install
-    # ffmpeg` on macOS doesn't), which drawtext needs - check once so we can
-    # skip the caption overlay instead of failing the whole generation.
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, timeout=10
-        )
-        return "drawtext" in result.stdout
-    except Exception:
-        return False
-
-
-        # Emoji and other pictographs have no glyph in DejaVu (the font the
-# container ships), and drawtext can fail outright rather than just
-# rendering a blank box - so they're stripped from burned-in text. The
-# full caption, emoji included, is still what gets posted.
+# Emoji and other pictographs have no glyph in the bundled fonts, so
+# they're stripped from text drawn onto the video.
 _UNRENDERABLE_TEXT = re.compile(
     "["
     "\U00010000-\U0010FFFF"  # astral plane: emoji, symbols, pictographs
@@ -273,12 +216,6 @@ _UNRENDERABLE_TEXT = re.compile(
     "‍"  # zero-width joiner (emoji sequences)
     "]+"
 )
-
-
-def _prepare_caption_overlay_text(caption: str) -> str:
-    stripped = _UNRENDERABLE_TEXT.sub("", caption)
-    collapsed = re.sub(r"\s+", " ", stripped).strip()
-    return collapsed[:MAX_CAPTION_OVERLAY_CHARS]
 
 
 def _summarize_ffmpeg_error(stderr: str) -> str:
@@ -297,152 +234,181 @@ def _summarize_ffmpeg_error(stderr: str) -> str:
         for line in lines
         if any(m in line.lower() for m in markers) and not line.startswith(noise)
     ]
-    chosen = interesting[-6:] if interesting else lines[-6:]
+    # The root cause is usually the *first* complaint; the tail is just
+    # the resulting "Conversion failed" cascade.
+    chosen = list(dict.fromkeys(interesting[:3] + interesting[-3:])) if interesting else lines[-6:]
     return " | ".join(chosen)[-1200:]
 
 
-def _ffmpeg_color(hex_color: str) -> str:
-    h = (hex_color or "").lstrip("#")
-    if re.fullmatch(r"[0-9a-fA-F]{6}", h):
-        return f"0x{h}"
-    return "0xFFFFFF"
+async def _run_ffmpeg(cmd: list[str]) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=FFMPEG_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise ReelGenerationError(f"ffmpeg timed out after {FFMPEG_TIMEOUT_SECONDS}s")
+
+    if proc.returncode == -9:
+        raise ReelGenerationError("ffmpeg was killed (-9), most likely out of memory on this server")
+    if proc.returncode != 0:
+        raise ReelGenerationError(
+            f"ffmpeg exited with code {proc.returncode}: "
+            f"{_summarize_ffmpeg_error(stderr.decode(errors='replace'))}"
+        )
 
 
-def _compute_image_time_ranges(clip_lens: list[float]) -> list[tuple[float, float]]:
-    """[start, end) on the final output timeline each image is the active/
-    front-most one - the same offset math as the xfade chain, so a
-    per-image text layer's `enable=between(t,start,end)` lines up with when
-    that image is actually on screen (with a little natural overlap during
-    the crossfade into/out of neighbors)."""
-    ranges: list[tuple[float, float]] = [(0.0, clip_lens[0])]
-    running_length = clip_lens[0]
-    for i in range(1, len(clip_lens)):
-        start = running_length - XFADE_SECONDS
-        running_length += clip_lens[i] - XFADE_SECONDS
-        ranges.append((start, running_length))
-    return ranges
+# Sized for a small server (Fly shared-cpu-1x, 1GB): every thread holds its
+# own full-resolution frames. -threads is per input/output, so it's
+# repeated before each -i and the output.
+FFMPEG_GLOBAL_ARGS = ["-filter_threads", "1", "-filter_complex_threads", "1"]
+THREADS = ["-threads", "2"]
+# No B-frames, so packet order is frame order and a segment's body can be cut
+# out with a stream copy (see _join_segments) - all pieces share these
+# settings, which is also what lets the concat demuxer join them unchanged.
+SEGMENT_ENCODE_ARGS = [
+    *THREADS, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-bf", "0", "-pix_fmt", "yuv420p",
+]
 
 
-def _quote_filtergraph_value(value: str) -> str:
-    # Wrap in single quotes so ':' and spaces (e.g. a macOS font path like
-    # "Arial Bold.ttf") in fontfile/textfile values can't be misread as
-    # filtergraph syntax. Inside single quotes only an embedded "'" needs
-    # escaping, via the standard close-escape-reopen trick.
-    return "'" + value.replace("'", "'\\''") + "'"
+@dataclass
+class _Segment:
+    src: str
+    is_video: bool
+    clip_len: float
+    zoom_style: str = DEFAULT_ZOOM_STYLE
+    color_filter: str = DEFAULT_COLOR_FILTER
+    # xfade transition into the next segment (unused on the last one).
+    transition: str = DEFAULT_TRANSITION
+    # Offset into a video source - Fast Cuts takes several clips from one.
+    start: float = 0.0
+    # Index of the source clip this came from (None for intro/outro cards).
+    source: int | None = None
+    # The template governing this clip (its own, else the reel's), and the
+    # length of the transition out of it - templates differ in both.
+    template: dict | None = None
+    fade_out: float = XFADE_SECONDS
+    # This clip's own text layers (see reel_text) - rendered to an overlay.
+    text_layers: list[dict] = field(default_factory=list)
+    # Full-frame RGBA PNGs laid over the segment, each with the second it
+    # disappears at (None = the whole segment).
+    overlays: list[tuple[str, float | None]] = field(default_factory=list)
 
 
-def _build_filter_complex(
-    image_count: int,
-    clip_lens: list[float],
-    font_path: str | None,
-    text_layers: list[dict],
-    image_text_layers: list[list[dict]],
-    transitions: list[str],
-    zoom_styles: list[str],
-    color_filters: list[str],
-    is_video: list[bool],
-) -> tuple[str, str, list[str], list[str]]:
-    """`clip_lens[i]` is image i's own on-screen duration (before overlap),
-    `zoom_styles[i]` its Ken Burns style, and `transitions[i]` the xfade
-    transition used going from image i into image i+1 (its last entry, if
-    any, is unused - there's nothing after the last image).
+async def _render_segment(seg: _Segment, out_path: str, fade_in_frames: int) -> None:
+    """Renders one segment to exactly WIDTHxHEIGHT, FPS and clip_len in its
+    own ffmpeg pass, overlays (text, logo, template graphics) included. Rendering every segment
+    inside one big filtergraph peaked at ~1.3GB (ffmpeg keeps frames of all
+    inputs in flight at once) - more than the whole server has.
 
-    `text_layers` are shown for the whole video; `image_text_layers[i]`
-    (one list per image) only while image i is on screen. Each layer dict:
-    {text, font_size, color, position}. Returns the filter string, the
-    final output label, the temp text files written for drawtext (the
-    caller must clean these up), and any warnings worth surfacing to the
-    user (e.g. text that couldn't be rendered).
+    Stills get the Ken Burns zoom. Video clips (any aspect ratio - AI models
+    mostly render landscape) are looped or cut to length and fitted onto a
+    blurred, cropped copy of themselves rather than cropped down.
     """
-    filters: list[str] = []
-    labels: list[str] = []
-    tmp_files: list[str] = []
-    warnings: list[str] = []
+    color_expr = COLOR_FILTERS.get(seg.color_filter, "")
+    color = f"{color_expr}," if color_expr else ""
+    frames = max(1, round(seg.clip_len * FPS))
 
-    for i in range(image_count):
-        color_expr = COLOR_FILTERS.get(color_filters[i], "")
-        label = f"v{i}"
-        if is_video[i]:
-            # Clips come in any aspect ratio (AI models mostly render
-            # landscape) - fit the whole frame onto a blurred, cropped copy
-            # of itself instead of cropping most of it away. No zoompan:
-            # the clip already moves.
-            filters.append(
-                f"[{i}:v]fps={FPS},setpts=PTS-STARTPTS,split=2[vs{i}a][vs{i}b];"
-                f"[vs{i}a]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-                f"crop={WIDTH}:{HEIGHT},boxblur=20:2[vbg{i}];"
-                f"[vs{i}b]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease[vfg{i}];"
-                f"[vbg{i}][vfg{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,"
-                + (f"{color_expr}," if color_expr else "")
-                + f"format=yuv420p[{label}]"
-            )
-        else:
-            zoom_expr = ZOOM_STYLES.get(zoom_styles[i], ZOOM_STYLES[DEFAULT_ZOOM_STYLE])
-            frames = max(1, round(clip_lens[i] * FPS))
-            filters.append(
-                f"[{i}:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-                f"crop={WIDTH}:{HEIGHT},setsar=1,"
-                + (f"{color_expr}," if color_expr else "")
-                + f"zoompan=z='{zoom_expr}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},format=yuv420p[{label}]"
-            )
-        labels.append(label)
-
-    prev_label = labels[0]
-    running_length = clip_lens[0]
-    for i in range(1, image_count):
-        xfade = transitions[i - 1] if transitions[i - 1] in XFADE_TRANSITIONS else DEFAULT_TRANSITION
-        offset = running_length - XFADE_SECONDS
-        out_label = f"xf{i}"
-        filters.append(
-            f"[{prev_label}][{labels[i]}]xfade=transition={xfade}:duration={XFADE_SECONDS}:offset={offset:.3f}[{out_label}]"
+    if seg.is_video:
+        # Blur a downscaled copy and scale it back up - same look, a
+        # fraction of the memory/CPU of blurring at full resolution.
+        graph = (
+            f"[0:v]fps={FPS},setpts=PTS-STARTPTS,split=2[bg][fg];"
+            f"[bg]scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH // 4}:{HEIGHT // 4},boxblur=5:2,scale={WIDTH}:{HEIGHT}[bgb];"
+            f"[fg]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease[fgs];"
+            f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1,{color}null[base]"
         )
-        prev_label = out_label
-        running_length += clip_lens[i] - XFADE_SECONDS
-
-    all_layers: list[tuple[dict, tuple[float, float] | None]] = [(layer, None) for layer in text_layers]
-    if any(image_text_layers):
-        time_ranges = _compute_image_time_ranges(clip_lens)
-        for i, layers in enumerate(image_text_layers):
-            for layer in layers:
-                all_layers.append((layer, time_ranges[i]))
-
-    if all_layers and not font_path:
-        warnings.append(
-            "Text wasn't added to the video: this server's ffmpeg has no drawtext "
-            "filter (built without libfreetype) or no usable font was found."
+        start = ["-ss", f"{seg.start:.3f}"] if seg.start > 0 else []
+        inputs = [*THREADS, "-stream_loop", "-1", *start, "-t", f"{seg.clip_len:.3f}", "-i", seg.src]
+    else:
+        zoom_z, zoom_x, zoom_y = (
+            expr.replace("{d}", str(frames))
+            for expr in ZOOM_STYLES.get(seg.zoom_style, ZOOM_STYLES[DEFAULT_ZOOM_STYLE])
         )
-        logger.warning(warnings[-1])
-    elif font_path:
-        for idx, (layer, time_range) in enumerate(all_layers):
-            text = (layer.get("text") or "").strip()
-            if not text:
-                continue
-            fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix=f"reel_text_{idx}_")
-            with os.fdopen(fd, "w") as f:
-                f.write(_prepare_caption_overlay_text(text))
-            tmp_files.append(tmp_path)
+        # A single decoded frame in; zoompan emits all `frames` from it.
+        # Colour grading goes before the zoom, on the one still.
+        graph = (
+            f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH}:{HEIGHT},setsar=1,{color}"
+            f"zoompan=z='{zoom_z}':x='{zoom_x}':y='{zoom_y}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},null[base]"
+        )
+        inputs = [*THREADS, "-i", seg.src]
 
-            font_size = max(MIN_FONT_SIZE, min(int(layer.get("font_size") or DEFAULT_FONT_SIZE), MAX_FONT_SIZE))
-            color = _ffmpeg_color(layer.get("color") or DEFAULT_TEXT_COLOR)
-            x_expr, y_expr = TEXT_POSITIONS.get(
-                layer.get("position") or DEFAULT_TEXT_POSITION, TEXT_POSITIONS[DEFAULT_TEXT_POSITION]
-            )
-            enable_clause = ""
-            if time_range is not None:
-                start, end = time_range
-                enable_clause = f":enable='between(t\\,{start:.3f}\\,{end:.3f})'"
+    prev = "base"
+    for k, (png, until) in enumerate(seg.overlays, start=1):
+        inputs += ["-loop", "1", "-i", png]
+        enable = f":enable='lt(t,{until:.3f})'" if until is not None else ""
+        graph += f";[{prev}][{k}:v]overlay=0:0:shortest=1{enable}[ov{k}]"
+        prev = f"ov{k}"
+    graph += f";[{prev}]{SEGMENT_TAIL}[out]"
 
-            out_label = f"txt{idx}"
-            filters.append(
-                f"[{prev_label}]drawtext=fontfile={_quote_filtergraph_value(font_path)}:"
-                f"textfile={_quote_filtergraph_value(tmp_path)}:"
-                f"fontsize={font_size}:fontcolor={color}:borderw=3:bordercolor=black@0.8:"
-                f"x={x_expr}:y={y_expr}:box=1:boxcolor=black@0.4:boxborderw=20{enable_clause}"
-                f"[{out_label}]"
-            )
-            prev_label = out_label
+    await _run_ffmpeg([
+        "ffmpeg", "-y", *FFMPEG_GLOBAL_ARGS, *inputs,
+        "-filter_complex", graph, "-map", "[out]", "-an", "-frames:v", str(frames),
+        *SEGMENT_ENCODE_ARGS,
+        # Keyframes where _join_segments cuts the body out.
+        "-force_key_frames", f"expr:eq(n,0)+eq(n,{fade_in_frames})",
+        out_path,
+    ])
 
-    return ";".join(filters), f"[{prev_label}]", tmp_files, warnings
+
+async def _join_segments(
+    segment_paths: list[str], clip_lens: list[float], transitions: list[str], fades: list[float], work_dir: str
+) -> str:
+    """Joins rendered segments with an xfade between neighbours, returning
+    the joined video's path (inside work_dir).
+
+    Chaining xfades over all segments in one filtergraph also blew the
+    memory budget (frames of the later inputs pile up while xfade is still
+    on the first). Instead only each transition is rendered (from two
+    transition-long inputs), the untouched middle "body" of each segment is stream-copied
+    out, and the pieces are concatenated without re-encoding - giving the
+    same timeline as chained xfades: body0, t01, body1, t12, ..., body_last.
+    `fades[i]` is the length of the transition out of segment i.
+    """
+    n = len(segment_paths)
+    pieces: list[str] = []
+
+    def piece_path(name: str) -> str:
+        return str(Path(work_dir) / name)
+
+    for i in range(n):
+        frames = max(1, round(clip_lens[i] * FPS))
+        fade_frames = round(fades[i] * FPS)
+        start = round(fades[i - 1] * FPS) if i > 0 else 0
+        end = frames - fade_frames if i < n - 1 else frames
+        if end > start:
+            body = piece_path(f"body_{i}.mp4")
+            await _run_ffmpeg([
+                "ffmpeg", "-y", "-ss", f"{start / FPS:.3f}", "-i", segment_paths[i],
+                "-map", "0:v", "-frames:v", str(end - start), "-c", "copy", body,
+            ])
+            pieces.append(body)
+
+        if i < n - 1:
+            xfade = transitions[i] if transitions[i] in XFADE_TRANSITIONS else DEFAULT_TRANSITION
+            transition = piece_path(f"xfade_{i}.mp4")
+            await _run_ffmpeg([
+                "ffmpeg", "-y", *FFMPEG_GLOBAL_ARGS,
+                *THREADS, "-ss", f"{(frames - fade_frames) / FPS:.3f}", "-i", segment_paths[i],
+                *THREADS, "-t", f"{fades[i]:.3f}", "-i", segment_paths[i + 1],
+                "-filter_complex",
+                f"[0:v]setpts=PTS-STARTPTS,{SEGMENT_TAIL}[a];[1:v]setpts=PTS-STARTPTS,{SEGMENT_TAIL}[b];"
+                f"[a][b]xfade=transition={xfade}:duration={fades[i]:.3f}:offset=0,{SEGMENT_TAIL}[out]",
+                "-map", "[out]", "-an", "-frames:v", str(fade_frames), *SEGMENT_ENCODE_ARGS, transition,
+            ])
+            pieces.append(transition)
+
+    list_file = piece_path("concat.txt")
+    Path(list_file).write_text("".join(f"file '{p}'\n" for p in pieces))
+    joined = piece_path("joined.mp4")
+    await _run_ffmpeg([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", joined,
+    ])
+    return joined
 
 
 async def generate_reel_video(
@@ -463,46 +429,62 @@ async def generate_reel_video(
     text_layers: list[dict] | None = None,
     image_text_layers: list[list[dict]] | None = None,
     color_filters: list[str] | None = None,
+    template_id: str | None = None,
+    brand: dict | None = None,
+    ctas: list[dict] | None = None,
+    clip_templates: list[str | None] | None = None,
 ) -> list[str]:
-    """Renders `out_path` (mp4) from the given ordered source paths + caption.
-    Each source is a still image or a video clip (by file extension); the
+    """Renders `out_path` (mp4) from the given ordered source paths. Each
+    source is a still image or a video clip (by file extension); the
     "image" naming below predates video segments and covers both.
 
-    `text_layers` are burned in for the whole video and
-    `image_text_layers[i]` only while image i is on screen; each layer is
-    {text, font_size, color, position}. Passing `text_layers=None` (never
-    customized) falls back to burning in `caption` as a single default
-    layer, the way it always worked; passing an empty list means the user
-    explicitly wants no text.
+    `text_layers` are drawn over the whole video and `image_text_layers[i]`
+    only while image i is on screen (see reel_text for the layer shape).
+    Only these user-added layers are drawn - `caption` is the post's text
+    and never goes on the video.
 
     `audio_path` ("music") and `voice_audio_path` ("voiceover") are two
     independent optional tracks, each with its own [start, end) trim. With
     both given, the music is auto-ducked under the voice track (via a
     sidechain compressor keyed off the voice's level) and the two are mixed;
     with only one given, that track alone is used as-is; with neither, the
-    video is silent.
+    video is silent (a muted track is still added - some platforms mishandle
+    video with zero audio streams). A track is padded with silence if
+    shorter than the video, hard-capped to the video's length, and given a
+    1s fade-out - it plays once, not looped.
 
     `image_durations[i]` is image i's own on-screen duration in seconds
     (before crossfade overlap is subtracted) - when omitted (or the wrong
-    length), `target_seconds` is split evenly across all images instead, as
-    before. The video's total length is whatever that list sums to (minus
-    overlaps), not a fixed target.
+    length), defaults come from _default_clip_lens. The video's total length
+    is whatever these sum to (minus overlaps).
 
     `zoom_styles[i]` (one per image) and `transitions[i]` (one per image,
     the crossfade used going into the next one - the last entry is unused)
     default to DEFAULT_ZOOM_STYLE/DEFAULT_TRANSITION for every image when
     not given, or for any entry missing from a too-short list.
 
-    With no `audio_path`, the video is silent (a muted track is still added -
-    some platforms mishandle video with zero audio streams). With one, that
-    file is trimmed to [audio_start, audio_end] (`audio_end=None` reads to
-    the file's natural end), padded with silence if shorter than the video,
-    hard-capped to the video's length, and given a 1s fade-out - it plays
-    once, not looped, if it doesn't fill the video.
+    `template_id` (see reel_templates) adds the template's graphics, cards
+    and cuts on top of the per-image settings above; `clip_templates[i]`
+    overrides it for clip i alone (its letterbox/frame, video cuts and
+    transition length). Intro/hook come from the first clip's template,
+    the outro from the last clip's. `brand` is {color,
+    title, cta, logo_path, logo_x, logo_y, logo_scale}: the logo (when
+    uploaded) is drawn on every clip at its dragged position, whatever the
+    template.
+
+    `ctas` (see reel_text.normalize_cta) are animated badges placed on the
+    reel's timeline: clip `clip`'s start + `offset`, for `duration` seconds,
+    running on over later clips if long enough.
 
     Returns any warnings worth showing the user (the render still
     succeeded). Raises ReelGenerationError on any ffmpeg failure or timeout.
     """
+    from app.services import reel_chrome
+    from app.services.reel_templates import CARD_SECONDS, get_template
+
+    template = get_template(template_id)
+    brand = dict(brand or {})
+
     if not image_paths:
         raise ReelGenerationError("A reel needs at least one image or video")
 
@@ -524,53 +506,248 @@ async def generate_reel_video(
         if not Path(path).is_file():
             raise ReelGenerationError(f"Missing {label} file: {path}")
 
+    # Each clip's template: its own if set, else the reel's.
+    clip_tpls = [get_template(t) for t in (clip_templates or [])[:n]]
+    clip_tpls += [None] * (n - len(clip_tpls))
+    seg_tpls = [clip_tpls[i] or template for i in range(n)]
+    first_tpl, last_tpl = seg_tpls[0] or {}, seg_tpls[-1] or {}
+    # Transition length: rhythm templates use quicker ones.
+    reel_fade = _fade_of(template)
+
+    card_count = int(bool(first_tpl.get("intro_card"))) + int(bool(last_tpl.get("outro_card")))
     if image_durations and len(image_durations) == n:
         clip_lens = [max(MIN_IMAGE_SECONDS, min(d, MAX_IMAGE_SECONDS)) for d in image_durations]
     else:
-        clip_lens = await _default_clip_lens(image_paths, target_seconds)
+        # Intro/outro cards come out of the target length, not on top of it.
+        content_seconds = max(MIN_IMAGE_SECONDS * n, target_seconds - card_count * (CARD_SECONDS - reel_fade))
+        clip_lens = await _default_clip_lens(image_paths, content_seconds, reel_fade)
     is_video = [is_video_path(p) for p in image_paths]
-
-    total_seconds = sum(clip_lens) - (n - 1) * XFADE_SECONDS
 
     zoom_styles = (zoom_styles or [])[:n] + [DEFAULT_ZOOM_STYLE] * max(0, n - len(zoom_styles or []))
     transitions = (transitions or [])[:n] + [DEFAULT_TRANSITION] * max(0, n - len(transitions or []))
     color_filters = (color_filters or [])[:n] + [DEFAULT_COLOR_FILTER] * max(0, n - len(color_filters or []))
 
-    font_path = _resolve_font_path() if _drawtext_filter_available() else None
+    global_layers = normalize_text_layers(text_layers)
+    per_image_layers = [normalize_text_layers(layers) for layers in (image_text_layers or [])[:n]]
+    per_image_layers += [[]] * (n - len(per_image_layers))
+    warnings: list[str] = []
 
-    if text_layers is None:
-        text_layers = [
-            {
-                "text": caption,
-                "font_size": DEFAULT_FONT_SIZE,
-                "color": DEFAULT_TEXT_COLOR,
-                "position": DEFAULT_TEXT_POSITION,
-            }
-        ]
-    resolved_image_text_layers = image_text_layers or []
-    resolved_image_text_layers = (resolved_image_text_layers[:n] + [[]] * max(0, n - len(resolved_image_text_layers)))
-
-    video_filters, video_out_label, tmp_text_files, warnings = _build_filter_complex(
-        n,
-        clip_lens,
-        font_path,
-        text_layers,
-        resolved_image_text_layers,
-        transitions,
-        zoom_styles,
-        color_filters,
-        is_video,
-    )
+    segments = [
+        _Segment(
+            src=image_paths[i],
+            is_video=is_video[i],
+            clip_len=clip_lens[i],
+            zoom_style=zoom_styles[i],
+            color_filter=color_filters[i],
+            transition=transitions[i],
+            text_layers=per_image_layers[i],
+            source=i,
+            template=seg_tpls[i],
+            fade_out=_fade_of(seg_tpls[i]),
+        )
+        for i in range(n)
+    ]
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
-    cmd: list[str] = ["ffmpeg", "-y"]
-    for image_path, clip_len, video in zip(image_paths, clip_lens, is_video):
-        # A clip shorter than its slot loops; a longer one is cut off.
-        loop_args = ["-stream_loop", "-1"] if video else ["-loop", "1"]
-        cmd += [*loop_args, "-t", f"{clip_len:.3f}", "-i", image_path]
+    work_dir = tempfile.mkdtemp(prefix="reel_")
+    try:
+        segments = await _rhythm_cuts(segments)
+        _add_overlays(segments, brand, global_layers, work_dir, reel_chrome)
+        segments = _add_cards(segments, first_tpl, last_tpl, brand, work_dir, reel_chrome, CARD_SECONDS)
+        # Every clip needs room for its transitions in and out.
+        for k, seg in enumerate(segments):
+            fade_in = segments[k - 1].fade_out if k > 0 else 0.0
+            fade_out = seg.fade_out if k < len(segments) - 1 else 0.0
+            seg.clip_len = max(seg.clip_len, fade_in + fade_out + 0.2)
 
-    next_index = n
+        total_seconds = sum(seg.clip_len for seg in segments) - sum(seg.fade_out for seg in segments[:-1])
+        cta_inputs = _place_ctas(normalize_ctas(ctas, n), segments, total_seconds, work_dir, reel_chrome)
+
+        # One at a time, so only one segment's frames are in memory at once.
+        # Overlays are burned into each segment (whole-video ones into all
+        # of them), so the transitions blend them like the rest of the
+        # picture and the final pass never has to re-encode the video.
+        segment_paths: list[str] = []
+        for i, seg in enumerate(segments):
+            segment_path = str(Path(work_dir) / f"segment_{i}.mp4")
+            await _render_segment(seg, segment_path, round(segments[i - 1].fade_out * FPS) if i else 0)
+            segment_paths.append(segment_path)
+        joined_path = await _join_segments(
+            segment_paths,
+            [seg.clip_len for seg in segments],
+            [seg.transition for seg in segments],
+            [seg.fade_out for seg in segments],
+            work_dir,
+        )
+        await _render_final(
+            joined_path, out_path, total_seconds,
+            audio_path, audio_start, audio_end, voice_audio_path, voice_audio_start, voice_audio_end,
+            cta_inputs,
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    return warnings
+
+
+def _rhythm(template: dict) -> list[float] | None:
+    """The template's clip-length pattern, when it cuts videos to it."""
+    if template.get("cut_videos") and template.get("durations"):
+        return [float(d) for d in template["durations"]]
+    if template.get("cut_seconds"):  # older single-length form
+        return [float(template["cut_seconds"])]
+    return None
+
+
+def _fade_of(template: dict | None) -> float:
+    return float((template or {}).get("xfade", XFADE_SECONDS))
+
+
+async def _rhythm_cuts(segments: list[_Segment]) -> list[_Segment]:
+    """Cuts each long-enough video into pieces following its template's
+    duration pattern (different stretches of the source each time), with
+    that template's transitions cycling between them - so a video fits the
+    template's rhythm the same way a run of stills does."""
+    expanded: list[_Segment] = []
+    for seg in segments:
+        tpl = seg.template or {}
+        fade = seg.fade_out
+        min_clip = max(MIN_IMAGE_SECONDS, 2 * fade + 0.2)
+        pattern = [max(min_clip, d) for d in _rhythm(tpl) or []]
+        if not pattern or not seg.is_video or seg.clip_len < min(pattern) * 1.5:
+            expanded.append(seg)
+            continue
+        cycle = tpl.get("transitions") or [tpl.get("transition", DEFAULT_TRANSITION)]
+        natural = await probe_duration(seg.src) or seg.clip_len
+
+        # Piece lengths that fill the clip's slot, overlaps included.
+        lengths: list[float] = []
+        remaining = seg.clip_len
+        while True:
+            length = pattern[len(lengths) % len(pattern)]
+            if remaining - (length - fade) < min_clip:
+                lengths.append(remaining)
+                break
+            lengths.append(length)
+            remaining -= length - fade
+
+        source_t = 0.0
+        for j, length in enumerate(lengths):
+            expanded.append(replace(
+                seg,
+                # Own copies - overlays get appended per piece later.
+                overlays=list(seg.overlays),
+                text_layers=list(seg.text_layers),
+                clip_len=length,
+                start=source_t % max(natural, 0.1),
+                transition=cycle[j % len(cycle)] if j < len(lengths) - 1 else seg.transition,
+            ))
+            source_t += length
+    return expanded
+
+
+def _add_overlays(
+    segments: list[_Segment], brand: dict, global_layers: list[dict], work_dir: str, chrome
+) -> None:
+    """Per clip: its template's chrome + the logo + whole-video text as one
+    overlay (shared by clips with the same template); the clip's own text
+    as another; the hook title over the first seconds. Only user-entered
+    text is ever drawn."""
+    def png(name: str) -> str:
+        return str(Path(work_dir) / name)
+
+    statics: dict[str | None, str | None] = {}
+    rendered: dict[int, str | None] = {}  # fast-cut pieces share their clip's layers
+    for i, seg in enumerate(segments):
+        key = (seg.template or {}).get("name")
+        if key not in statics:
+            statics[key] = chrome.render_overlay(
+                png(f"static_{len(statics)}.png"), layers=global_layers, template=seg.template, brand=brand,
+                with_logo=True,
+            )
+        if statics[key]:
+            seg.overlays.append((statics[key], None))
+        if seg.text_layers:
+            text_key = id(seg.text_layers[0])
+            if text_key not in rendered:
+                rendered[text_key] = chrome.render_overlay(png(f"text_{i}.png"), layers=seg.text_layers)
+            if rendered[text_key]:
+                seg.overlays.append((rendered[text_key], None))
+
+    title = (brand.get("title") or "").strip()
+    first_tpl = (segments[0].template if segments else None) or {}
+    hook_seconds = first_tpl.get("hook_seconds")
+    if hook_seconds and title:
+        hook = chrome.render_hook(title, first_tpl.get("hook_style", "bold"), brand, png("hook.png"))
+        if hook:
+            segments[0].overlays.append((hook, min(hook_seconds, segments[0].clip_len)))
+
+
+def _place_ctas(
+    ctas: list[dict], segments: list[_Segment], total_seconds: float, work_dir: str, chrome
+) -> list[tuple[str, float, int, int]]:
+    """Renders each CTA's animation frames and works out where it starts on
+    the joined timeline. Returns (frame pattern, start second, x, y)."""
+    # Joined timeline: segment k starts where the previous one's crossfade
+    # into it begins.
+    clip_starts: dict[int, float] = {}
+    t = 0.0
+    for seg in segments:
+        if seg.source is not None:
+            clip_starts.setdefault(seg.source, t)
+        t += seg.clip_len - seg.fade_out
+
+    placed: list[tuple[str, float, int, int]] = []
+    for i, cta in enumerate(ctas):
+        start = clip_starts.get(cta["clip"], 0.0) + cta["offset"]
+        if start >= total_seconds - 0.2:
+            continue  # starts after the reel ends
+        cta = {**cta, "duration": min(cta["duration"], total_seconds - start)}
+        pattern, x, y = chrome.render_cta_frames(cta, str(Path(work_dir) / f"cta_{i}"), FPS)
+        placed.append((pattern, start, x, y))
+    return placed
+
+
+def _add_cards(
+    segments: list[_Segment], first_tpl: dict, last_tpl: dict, brand: dict, work_dir: str, chrome,
+    card_seconds: float,
+) -> list[_Segment]:
+    """Intro card per the first clip's template, outro per the last's."""
+    def card(name: str, title: str, fade: float) -> _Segment:
+        path = chrome.render_card(title, "", brand, str(Path(work_dir) / name))
+        return _Segment(
+            src=path, is_video=False, clip_len=card_seconds, zoom_style="zoom_in", transition="fade", fade_out=fade
+        )
+
+    if first_tpl.get("intro_card"):
+        segments = [card("intro.jpg", brand.get("title") or "", _fade_of(first_tpl))] + segments
+    if last_tpl.get("outro_card"):
+        segments[-1].transition = "fade"
+        segments[-1].fade_out = _fade_of(last_tpl)
+        segments = segments + [card("outro.jpg", brand.get("outro") or "", _fade_of(last_tpl))]
+    return segments
+
+
+async def _render_final(
+    joined_path: str,
+    out_path: str,
+    total_seconds: float,
+    audio_path: str | None,
+    audio_start: float,
+    audio_end: float | None,
+    voice_audio_path: str | None,
+    voice_audio_start: float,
+    voice_audio_end: float | None,
+    cta_inputs: list[tuple[str, float, int, int]] = (),
+) -> None:
+    """Muxes the joined video with the audio. The video is copied as-is,
+    unless there are CTAs to animate over it - they live on the whole-reel
+    timeline (and can span clips), so they're overlaid here, re-encoding
+    the video once with a single video input."""
+    cmd: list[str] = ["ffmpeg", "-y", *FFMPEG_GLOBAL_ARGS, *THREADS, "-i", joined_path]
+
+    next_index = 1
     music_index: int | None = None
     voice_index: int | None = None
 
@@ -622,39 +799,33 @@ async def generate_reel_video(
         audio_map = f"{next_index}:a"
         next_index += 1
 
-    audio_filters = ";".join(audio_parts) if audio_parts else None
-    filter_complex = video_filters + (";" + audio_filters if audio_filters else "")
-    cmd += ["-filter_complex", filter_complex]
-    cmd += ["-map", video_out_label, "-map", audio_map]
+    video_parts: list[str] = []
+    video_map = "0:v"
+    if cta_inputs:
+        prev = "0:v"
+        for k, (pattern, start, x, y) in enumerate(cta_inputs):
+            # Offset so the sequence's first frame lands at `start`; the
+            # overlay passes the video through before and after it.
+            cmd += ["-itsoffset", f"{start:.3f}", "-framerate", str(FPS), "-i", pattern]
+            label = f"vcta{k}"
+            video_parts.append(f"[{prev}][{next_index}:v]overlay={x}:{y}:eof_action=pass:format=auto[{label}]")
+            prev = label
+            next_index += 1
+        video_parts.append(f"[{prev}]{SEGMENT_TAIL}[vout]")
+        video_map = "[vout]"
+
+    if audio_parts or video_parts:
+        cmd += ["-filter_complex", ";".join(video_parts + audio_parts)]
+    cmd += ["-map", video_map, "-map", audio_map]
     cmd += [
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
+        *(SEGMENT_ENCODE_ARGS if cta_inputs else ["-c:v", "copy"]),
         "-movflags", "+faststart",
         "-c:a", "aac",
-        "-shortest",
+        # Not -shortest: every audio branch is already trimmed/padded to
+        # total_seconds, and -shortest made ffmpeg buffer ~900MB of frames
+        # to line the streams up.
+        "-t", f"{total_seconds:.3f}",
         out_path,
     ]
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=FFMPEG_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise ReelGenerationError(f"ffmpeg timed out after {FFMPEG_TIMEOUT_SECONDS}s")
-
-        if proc.returncode != 0:
-            raise ReelGenerationError(
-                f"ffmpeg exited with code {proc.returncode}: "
-                f"{_summarize_ffmpeg_error(stderr.decode(errors='replace'))}"
-            )
-    finally:
-        for tmp_file in tmp_text_files:
-            Path(tmp_file).unlink(missing_ok=True)
-
-    return warnings
+    await _run_ffmpeg(cmd)

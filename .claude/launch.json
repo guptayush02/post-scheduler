@@ -6,6 +6,18 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
       "port": 5173
+    },
+    {
+      "name": "backend-dev",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd backend && MONGODB_DB_NAME=scheduler_dev FRONTEND_BASE_URL=http://localhost:5174 .venv/bin/uvicorn app.main:app --port 8001"],
+      "port": 8001
+    },
+    {
+      "name": "frontend-dev",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd frontend && VITE_PROXY_TARGET=http://localhost:8001 PORT=5174 npx vite --strictPort"],
+      "port": 5174
     }
   ]
 }
