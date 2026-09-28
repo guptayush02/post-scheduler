@@ -333,3 +333,32 @@ def render_cta_frames(cta: dict, out_dir: str, fps: int) -> tuple[str, int, int]
     x = min(max(x, -margin), WIDTH - bw - margin)
     y = min(max(y, -margin), HEIGHT - bh - margin)
     return str(Path(out_dir) / "f_%05d.png"), x, y
+
+
+def render_vhs_stamp(out_path: str) -> str:
+    """The on-screen display of an 80s camcorder: "PLAY" with a triangle
+    top-left, and the tape's time/date bottom-left."""
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    size = _px(58)
+    font = _ui_font(size, "bebas")
+    margin = _px(60)
+    shadow = (0, 0, 0, 160)
+    white = (255, 255, 255, 235)
+
+    def text(xy, value):
+        draw.text((xy[0] + _px(3), xy[1] + _px(3)), value, font=font, fill=shadow)
+        draw.text(xy, value, font=font, fill=white)
+
+    top = margin + _px(40)
+    text((margin, top), "PLAY")
+    tri_x = margin + draw.textlength("PLAY ", font=font)
+    tri_h = size * 0.7
+    tri_top = top + (size - tri_h) / 2 + _px(4)
+    draw.polygon([(tri_x, tri_top), (tri_x, tri_top + tri_h), (tri_x + tri_h * 0.85, tri_top + tri_h / 2)], fill=white)
+
+    bottom = HEIGHT - margin - _px(60) - 2 * size
+    text((margin, bottom), "AM 12:00")
+    text((margin, bottom + size), "JAN. 01 1988")
+    image.save(out_path)
+    return out_path

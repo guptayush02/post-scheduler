@@ -157,6 +157,19 @@ REEL_TEMPLATES: dict[str, dict] = {
         "cut_videos": True,
         "xfade": 0.3,
     },
+    "retro_vhs": {
+        "name": "Retro VHS",
+        "description": "80s camcorder look - tape noise, scanlines and a PLAY/date stamp, with glitchy slice cuts.",
+        "transitions": ["hlslice", "fadeblack", "vuslice", "pixelize"],
+        "transition": "hlslice",
+        "zoom_styles": ["zoom_in", "pan_right", "zoom_out"],
+        "zoom_style": "zoom_in",
+        "color_filter": "none",
+        "effect": "vhs_80s",
+        "durations": [2.5],
+        "cut_videos": True,
+        "xfade": 0.4,
+    },
     "dreamy_fade": {
         "name": "Dreamy Fade",
         "description": "Long, soft dissolves and fades through black over warm, slowly zooming clips.",
@@ -223,6 +236,7 @@ async def apply_template(post, template_id: str | None) -> None:
     post.reel_image_transitions = [slot["transition"] for slot in slots]
     post.reel_image_zoom_styles = [slot["zoom_style"] for slot in slots]
     post.reel_image_color_filters = [template["color_filter"]] * n
+    post.reel_image_effects = [template.get("effect", "none")] * n
     if template.get("durations"):
         durations: list[float] = []
         for path, slot in zip(sources, slots):

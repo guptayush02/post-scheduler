@@ -52,6 +52,10 @@ class ScheduledPost(Document):
     reel_target_seconds: float = 45.0
     # "Music" track.
     reel_audio_path: str | None = None
+    # When the music came from the free library (services/music_library):
+    # the track's details, for showing it and for the CC BY credit that's
+    # added to the post text when publishing.
+    reel_music_track: dict | None = None
     reel_audio_start_seconds: float = 0.0
     reel_audio_end_seconds: float | None = None
     # "Voiceover" track - when both this and the music track are set, the
@@ -81,6 +85,8 @@ class ScheduledPost(Document):
     reel_image_text_layers: list[list[dict]] | None = None
     # Per-image colour grading preset (same order as reel_source_images).
     reel_image_color_filters: list[str] | None = None
+    # Per-image effect (film / 80s VHS...), layered on the colour filter.
+    reel_image_effects: list[str] | None = None
     # Template (see services/reel_templates.py) and the brand details its
     # graphics use. The title is only ever what the user typed.
     reel_template: str | None = None

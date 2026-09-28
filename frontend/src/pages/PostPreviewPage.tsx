@@ -11,8 +11,10 @@ import {
   scheduleDraftPost,
   templateSlot,
   REEL_COLOR_FILTERS,
+  REEL_EFFECTS,
   REEL_TRANSITIONS,
   REEL_ZOOM_STYLES,
+  type MusicTrack,
   type Post,
   type ReelCta,
   type ReelTemplate,
@@ -25,6 +27,7 @@ import AudioTrackEditor from '../components/AudioTrackEditor'
 import TextLayerEditor from '../components/TextLayerEditor'
 import CtaEditor from '../components/CtaEditor'
 import VoiceRecorder from '../components/VoiceRecorder'
+import MusicBrowser from '../components/MusicBrowser'
 
 const MIN_IMAGE_SECONDS = 1 // must match reel_generator.py
 const MAX_IMAGE_SECONDS = 60 // must match reel_generator.py
@@ -200,6 +203,9 @@ function ReelEditor({
       Array.from({ length: imageCount }, (_, i) => [i, post.reel_image_color_filters?.[i] ?? 'none']),
     ),
   )
+  const [imageEffects, setImageEffects] = useState<Record<number, string>>(() =>
+    Object.fromEntries(Array.from({ length: imageCount }, (_, i) => [i, post.reel_image_effects?.[i] ?? 'none'])),
+  )
   const [selectedPos, setSelectedPos] = useState(0)
   // What the live preview plays: the whole reel, the ticked clips, or one
   // clip (by original index) - a single clip holds still for placing text.
@@ -316,12 +322,14 @@ function ReelEditor({
     const transitions: Record<number, string> = { ...imageTransitions }
     const zooms: Record<number, ReelZoomStyle> = { ...imageZoomStyles }
     const colors: Record<number, string> = { ...imageColorFilters }
+    const looks: Record<number, string> = { ...imageEffects }
     const lengths: Record<number, number> = { ...imageDurations }
     ;(targets ?? imageOrder).forEach((original, pos) => {
       const slot = templateSlot(style, pos)
       transitions[original] = slot.transition
       zooms[original] = slot.zoomStyle
       colors[original] = style.color_filter
+      looks[original] = style.effect ?? 'none'
       const url = clipUrls[original]
       if (slot.duration !== null) {
         lengths[original] = clipIsVideo[original]
@@ -332,6 +340,7 @@ function ReelEditor({
     setImageTransitions(transitions)
     setImageZoomStyles(zooms)
     setImageColorFilters(colors)
+    setImageEffects(looks)
     setImageDurations(lengths)
   }
 
@@ -354,6 +363,7 @@ function ReelEditor({
     const zooms: Record<number, ReelZoomStyle> = {}
     const durations: Record<number, number> = {}
     const colors: Record<number, string> = {}
+    const looks: Record<number, string> = {}
     const texts: Record<number, ReelTextLayer[]> = {}
     added.forEach((clip, j) => {
       const index = firstIndex + j
@@ -366,6 +376,7 @@ function ReelEditor({
           ? Math.max(MIN_IMAGE_SECONDS, Math.min(MAX_IMAGE_SECONDS, natural))
           : (slot?.duration ?? 3)
       colors[index] = template?.color_filter ?? 'none'
+      looks[index] = template?.effect ?? 'none'
       texts[index] = []
     })
     setNewClips((prev) => [...prev, ...added])
@@ -373,6 +384,7 @@ function ReelEditor({
     setImageZoomStyles((prev) => ({ ...prev, ...zooms }))
     setImageDurations((prev) => ({ ...prev, ...durations }))
     setImageColorFilters((prev) => ({ ...prev, ...colors }))
+    setImageEffects((prev) => ({ ...prev, ...looks }))
     setImageTextLayers((prev) => ({ ...prev, ...texts }))
     setImageOrder((prev) => [...prev, ...added.map((_, j) => firstIndex + j)])
   }
@@ -399,12 +411,32 @@ function ReelEditor({
     }
   }
 
+  // A free-library track picked on this page (downloaded on regenerate).
+  const [libraryTrack, setLibraryTrack] = useState<MusicTrack | null>(null)
+  const [showMusicBrowser, setShowMusicBrowser] = useState(false)
+
   const onPickMusicFile = (file: File | null) => {
     setMusicFile(file)
+    setLibraryTrack(null)
     setRemoveMusic(false)
     setMusicStart(0)
     setMusicEnd(null)
   }
+
+  const onPickLibraryTrack = (track: MusicTrack) => {
+    setLibraryTrack(track)
+    setMusicFile(null)
+    setRemoveMusic(false)
+    setMusicStart(0)
+    setMusicEnd(null)
+  }
+
+  const savedTrack = post.reel_music_track
+  const musicLabel = libraryTrack
+    ? `🎵 ${libraryTrack.title} - ${libraryTrack.creator} (picked, added when you regenerate)`
+    : savedTrack && hasExistingMusic
+      ? `🎵 ${savedTrack.title} - ${savedTrack.creator}${savedTrack.credit ? ' · credit added to the post text' : ''}`
+      : null
 
   // Set when the voiceover came from the recorder rather than a file.
   const [voiceRecordedSeconds, setVoiceRecordedSeconds] = useState<number | null>(null)
@@ -442,7 +474,8 @@ function ReelEditor({
         audio: musicFile,
         audioStart: musicStart,
         audioEnd: musicEnd,
-        removeAudio: removeMusic,
+        removeAudio: removeMusic && !libraryTrack,
+        musicTrackId: libraryTrack?.id ?? null,
         voiceAudio: voiceFile,
         voiceAudioStart: voiceStart,
         voiceAudioEnd: voiceEnd,
@@ -456,6 +489,7 @@ function ReelEditor({
           (imageTextLayers[i] ?? []).filter((layer) => layer.text.trim()),
         ),
         imageColorFilters: Array.from({ length: clipCount }, (_, i) => imageColorFilters[i] ?? 'none'),
+        imageEffects: Array.from({ length: clipCount }, (_, i) => imageEffects[i] ?? 'none'),
         template: templateId,
         brandColor,
         titleText,
@@ -503,6 +537,7 @@ function ReelEditor({
       zoomStyles={imageOrder.map((i) => imageZoomStyles[i])}
       durations={imageOrder.map((i) => imageDurations[i])}
       colorFilters={imageOrder.map((i) => imageColorFilters[i])}
+      effects={imageOrder.map((i) => imageEffects[i])}
       textLayers={textLayers}
       imageTextLayers={imageOrder.map((i) => imageTextLayers[i])}
       template={template}
@@ -937,8 +972,35 @@ function ReelEditor({
                   Clear ticks ({checkedClips.length})
                 </button>
               )}
-              <span className="text-gray-400">Tick clips to give them their own template or preview just them.</span>
+              <span className="text-gray-400">Tick clips to give them their own template or effect, or preview just them.</span>
             </div>
+            {checkedClips.length > 0 && (
+              <label className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <span className="font-medium">Effect on ticked clips ({checkedClips.length}):</span>
+                <select
+                  value={(() => {
+                    const shared = [...new Set(checkedClips.map((o) => imageEffects[o] ?? 'none'))]
+                    return shared.length === 1 ? shared[0] : ''
+                  })()}
+                  onChange={(e) => {
+                    const effect = e.target.value
+                    if (!effect) return
+                    setImageEffects((prev) => ({ ...prev, ...Object.fromEntries(checkedClips.map((o) => [o, effect])) }))
+                  }}
+                  className="rounded-md border border-amber-300 bg-white px-2 py-1 text-xs focus:border-indigo-500 focus:outline-none"
+                >
+                  <option value="" disabled>
+                    Mixed
+                  </option>
+                  {REEL_EFFECTS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-amber-700">Works on images and videos alike.</span>
+              </label>
+            )}
             <div className="mt-2 flex flex-wrap gap-2">
               {imageOrder.map((originalIndex, pos) => {
                 const src = clipUrls[originalIndex]
@@ -986,6 +1048,11 @@ function ReelEditor({
                     >
                       {effectiveTemplate(originalIndex)?.name ?? '—'}
                     </span>
+                    {(imageEffects[originalIndex] ?? 'none') !== 'none' && (
+                      <span className="block w-16 truncate text-center text-[9px] font-semibold text-amber-700">
+                        {imageEffects[originalIndex] === 'vhs_80s' ? '📼 VHS' : '🎞 Film'}
+                      </span>
+                    )}
                     {imageOrder.length > 1 && (
                       <button
                         type="button"
@@ -1056,6 +1123,31 @@ function ReelEditor({
                   ))}
                 </select>
 
+                <label className="mt-3 block text-xs text-gray-500">Effect</label>
+                <select
+                  value={imageEffects[imageOrder[selectedPos]] ?? 'none'}
+                  onChange={(e) => setImageEffects((prev) => ({ ...prev, [imageOrder[selectedPos]]: e.target.value }))}
+                  className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+                >
+                  {REEL_EFFECTS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const effect = imageEffects[imageOrder[selectedPos]] ?? 'none'
+                      setImageEffects(Object.fromEntries(imageOrder.map((o) => [o, effect])))
+                    }}
+                    className="text-indigo-600 hover:underline"
+                  >
+                    Apply to all clips
+                  </button>
+                </div>
+
                 {selectedPos < imageOrder.length - 1 ? (
                   <>
                     <label className="mt-3 block text-xs text-gray-500">
@@ -1108,8 +1200,32 @@ function ReelEditor({
               onStartChange={setMusicStart}
               end={musicEnd}
               onEndChange={setMusicEnd}
-              onRemove={() => setRemoveMusic(true)}
-            />
+              onRemove={() => {
+                setRemoveMusic(true)
+                setLibraryTrack(null)
+              }}
+              sourceUrl={libraryTrack?.preview_url ?? null}
+              sourceLabel={musicLabel}
+            >
+              <div className="mb-2 mt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowMusicBrowser((v) => !v)}
+                  className="rounded-md border border-indigo-200 px-3 py-1.5 text-sm font-medium text-indigo-700 hover:bg-indigo-50"
+                >
+                  {showMusicBrowser ? 'Hide free music' : '🎵 Browse free music'}
+                </button>
+                {showMusicBrowser && (
+                  <div className="mt-2">
+                    <MusicBrowser
+                      selectedId={libraryTrack?.id ?? savedTrack?.id ?? null}
+                      onPick={onPickLibraryTrack}
+                    />
+                  </div>
+                )}
+                <p className="mt-2 text-xs text-gray-400">…or upload your own audio file:</p>
+              </div>
+            </AudioTrackEditor>
             <AudioTrackEditor
               label="Voiceover"
               existingUrl={post.reel_voice_audio_url}
@@ -1131,7 +1247,7 @@ function ReelEditor({
                 <p className="mt-2 text-xs text-gray-400">…or upload an audio file:</p>
               </div>
             </AudioTrackEditor>
-            {(hasExistingMusic || musicFile) && (hasExistingVoice || voiceFile) && (
+            {(hasExistingMusic || musicFile || libraryTrack) && (hasExistingVoice || voiceFile) && (
               <p className="text-xs text-gray-400">
                 Both tracks set — music will auto-duck (get quieter) under the voiceover.
               </p>

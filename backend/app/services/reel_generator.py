@@ -81,8 +81,8 @@ ZOOM_STYLES: dict[str, tuple[str, str, str]] = {
 }
 DEFAULT_ZOOM_STYLE = "zoom_in"
 
-# Colour grading presets applied per image, right after the crop and before
-# the Ken Burns zoom. "none" means no extra filter at all.
+# Colour grading presets applied per clip, per frame (after the Ken Burns
+# motion). "none" means no extra filter at all.
 COLOR_FILTERS: dict[str, str] = {
     "none": "",
     # colorbalance is split into shadows/midtones/highlights (s/m/h) - all
@@ -95,6 +95,25 @@ COLOR_FILTERS: dict[str, str] = {
     "bw": "hue=s=0",
 }
 DEFAULT_COLOR_FILTER = "none"
+
+# Effects: whole looks layered on top of the colour filter, per frame.
+EFFECTS: dict[str, str] = {
+    "none": "",
+    # Old film: faded warm tones, moving grain, dark corners.
+    "film": (
+        "curves=vintage,colorchannelmixer=rr=1.04:gg=0.98:bb=0.9,"
+        "eq=saturation=0.8:contrast=0.92:brightness=0.03,noise=alls=10:allf=t,vignette=PI/4.5"
+    ),
+    # 80s camcorder / VHS tape: soft half-resolution picture, red/blue
+    # fringing, punchy colour, tape noise and scanlines. The PLAY / date
+    # stamp is a separate overlay (see _add_overlays).
+    "vhs_80s": (
+        f"scale={WIDTH // 2}:{HEIGHT // 2},scale={WIDTH}:{HEIGHT}:flags=bilinear,rgbashift=rh=3:bh=-3:gv=1,"
+        "eq=saturation=1.35:contrast=1.08:brightness=0.02,noise=alls=14:allf=t,"
+        "drawgrid=w=iw:h=4:t=1:c=black@0.2,vignette=PI/5"
+    ),
+}
+DEFAULT_EFFECT = "none"
 
 # Appended to every segment's chain so all xfade inputs already match
 # exactly. JPEGs decode as full-range and video as limited-range; left
@@ -280,6 +299,7 @@ class _Segment:
     clip_len: float
     zoom_style: str = DEFAULT_ZOOM_STYLE
     color_filter: str = DEFAULT_COLOR_FILTER
+    effect: str = DEFAULT_EFFECT
     # xfade transition into the next segment (unused on the last one).
     transition: str = DEFAULT_TRANSITION
     # Offset into a video source - Fast Cuts takes several clips from one.
@@ -307,8 +327,8 @@ async def _render_segment(seg: _Segment, out_path: str, fade_in_frames: int) -> 
     mostly render landscape) are looped or cut to length and fitted onto a
     blurred, cropped copy of themselves rather than cropped down.
     """
-    color_expr = COLOR_FILTERS.get(seg.color_filter, "")
-    color = f"{color_expr}," if color_expr else ""
+    looks = [COLOR_FILTERS.get(seg.color_filter, ""), EFFECTS.get(seg.effect, "")]
+    color = "".join(f"{look}," for look in looks if look)
     frames = max(1, round(seg.clip_len * FPS))
 
     if seg.is_video:
@@ -329,11 +349,11 @@ async def _render_segment(seg: _Segment, out_path: str, fade_in_frames: int) -> 
             for expr in ZOOM_STYLES.get(seg.zoom_style, ZOOM_STYLES[DEFAULT_ZOOM_STYLE])
         )
         # A single decoded frame in; zoompan emits all `frames` from it.
-        # Colour grading goes before the zoom, on the one still.
+        # The look is applied per frame after the motion (grain moves).
         graph = (
             f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={WIDTH}:{HEIGHT},setsar=1,{color}"
-            f"zoompan=z='{zoom_z}':x='{zoom_x}':y='{zoom_y}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},null[base]"
+            f"crop={WIDTH}:{HEIGHT},setsar=1,"
+            f"zoompan=z='{zoom_z}':x='{zoom_x}':y='{zoom_y}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},{color}null[base]"
         )
         inputs = [*THREADS, "-i", seg.src]
 
@@ -433,6 +453,7 @@ async def generate_reel_video(
     brand: dict | None = None,
     ctas: list[dict] | None = None,
     clip_templates: list[str | None] | None = None,
+    effects: list[str] | None = None,
 ) -> list[str]:
     """Renders `out_path` (mp4) from the given ordered source paths. Each
     source is a still image or a video clip (by file extension); the
@@ -526,6 +547,7 @@ async def generate_reel_video(
     zoom_styles = (zoom_styles or [])[:n] + [DEFAULT_ZOOM_STYLE] * max(0, n - len(zoom_styles or []))
     transitions = (transitions or [])[:n] + [DEFAULT_TRANSITION] * max(0, n - len(transitions or []))
     color_filters = (color_filters or [])[:n] + [DEFAULT_COLOR_FILTER] * max(0, n - len(color_filters or []))
+    effects = (effects or [])[:n] + [DEFAULT_EFFECT] * max(0, n - len(effects or []))
 
     global_layers = normalize_text_layers(text_layers)
     per_image_layers = [normalize_text_layers(layers) for layers in (image_text_layers or [])[:n]]
@@ -539,6 +561,7 @@ async def generate_reel_video(
             clip_len=clip_lens[i],
             zoom_style=zoom_styles[i],
             color_filter=color_filters[i],
+            effect=effects[i],
             transition=transitions[i],
             text_layers=per_image_layers[i],
             source=i,
@@ -668,6 +691,10 @@ def _add_overlays(
             )
         if statics[key]:
             seg.overlays.append((statics[key], None))
+        if seg.effect == "vhs_80s":
+            if "vhs" not in statics:
+                statics["vhs"] = chrome.render_vhs_stamp(png("vhs_stamp.png"))
+            seg.overlays.append((statics["vhs"], None))
         if seg.text_layers:
             text_key = id(seg.text_layers[0])
             if text_key not in rendered:

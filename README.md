@@ -303,6 +303,18 @@ fly.toml       # Fly.io app config (volume mount, always-on machine, env)
   template's chrome, video cuts and transition length; intro/hook follow
   the first clip's template and the outro the last's. The live preview can
   play the whole reel, just the ticked clips, or a single clip.
+- **Effects** (per clip, on images and videos alike, layered on the colour
+  filter): Vintage film (faded warm tones, moving grain, vignette) and 80s
+  camcorder / VHS (soft picture, colour fringing, scanlines, tape noise and
+  a PLAY / date stamp). Tick clips to set an effect on all of them at once;
+  the Retro VHS template applies the VHS effect.
+- **Free music** ("Browse free music" on the preview page): searches
+  Openverse (api.openverse.org, no API key) for music licensed CC0, Public
+  Domain or CC BY only - licenses that allow putting a song in a video, also
+  commercially (NoDerivatives / ShareAlike / NonCommercial are excluded).
+  The backend re-looks-up the picked track and downloads it itself
+  (`services/music_library.py`); CC BY credit is appended to the post text
+  on publish. Anonymous Openverse requests are rate-limited.
 - **Edit with AI** (`POST /api/posts/{id}/ai-edit`): a plain-language request
   is turned into a validated patch of the reel's settings by any
   OpenAI-compatible chat API (`AI_EDIT_*`, defaults to HF's router), then the

@@ -29,6 +29,7 @@ class PostResponse(BaseModel):
     reel_target_seconds: float
     reel_audio_path: str | None
     reel_audio_url: str | None
+    reel_music_track: dict | None
     reel_audio_start_seconds: float
     reel_audio_end_seconds: float | None
     reel_voice_audio_path: str | None
@@ -43,6 +44,7 @@ class PostResponse(BaseModel):
     reel_text_layers: list[dict] | None
     reel_image_text_layers: list[list[dict]] | None
     reel_image_color_filters: list[str] | None
+    reel_image_effects: list[str] | None
     reel_warning: str | None
     reel_template: str | None
     reel_clip_templates: list[str | None] | None

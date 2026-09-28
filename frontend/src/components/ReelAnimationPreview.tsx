@@ -45,6 +45,24 @@ const COLOR_FILTER_CSS: Record<string, string> = {
   bw: 'grayscale(1)',
 }
 
+// CSS stand-ins for reel_generator.py's EFFECTS (layered on the colour
+// filter), plus overlays drawn over the picture below.
+const EFFECT_CSS: Record<string, string> = {
+  none: '',
+  film: 'sepia(0.35) saturate(0.8) contrast(0.92) brightness(1.03)',
+  vhs_80s: 'saturate(1.35) contrast(1.08) blur(0.5px)',
+}
+// Static film grain (SVG turbulence) - the render's grain moves per frame.
+const GRAIN =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E\")"
+
+function lookCss(colorFilter: string | undefined, effect: string | undefined): string {
+  const parts = [COLOR_FILTER_CSS[colorFilter ?? 'none'], EFFECT_CSS[effect ?? 'none']].filter(
+    (part) => part && part !== 'none',
+  )
+  return parts.length ? parts.join(' ') : 'none'
+}
+
 const DEFAULT_DISPLAY_MS = 2200
 const MIN_DISPLAY_MS = 800
 const MAX_DISPLAY_MS = 4000
@@ -115,6 +133,7 @@ type Entry =
       zoomStyle?: ReelZoomStyle
       duration?: number
       colorFilter?: string
+      effect?: string
       texts: ReelTextLayer[]
       // The template governing this clip (its own, else the reel's).
       tpl: ReelTemplate | null
@@ -137,6 +156,7 @@ export default function ReelAnimationPreview({
   zoomStyles,
   durations,
   colorFilters,
+  effects,
   textLayers,
   imageTextLayers,
   template = null,
@@ -159,6 +179,7 @@ export default function ReelAnimationPreview({
   zoomStyles: (ReelZoomStyle | undefined)[]
   durations: (number | undefined)[]
   colorFilters: (string | undefined)[]
+  effects?: (string | undefined)[]
   // Shown for the whole video.
   textLayers: ReelTextLayer[]
   // imageTextLayers[i] shows only while image i is on screen.
@@ -200,6 +221,7 @@ export default function ReelAnimationPreview({
       zoomStyle: zoomStyles[i],
       duration: durations[i],
       colorFilter: colorFilters[i],
+      effect: effects?.[i],
       texts: imageTextLayers[i] ?? [],
       tpl,
     }
@@ -410,7 +432,7 @@ export default function ReelAnimationPreview({
                   loop
                   playsInline
                   className="h-full w-full object-cover"
-                  style={{ filter: COLOR_FILTER_CSS[entry.colorFilter ?? 'none'] ?? 'none' }}
+                  style={{ filter: lookCss(entry.colorFilter, entry.effect) }}
                 />
               ) : (
                 <img
@@ -421,7 +443,7 @@ export default function ReelAnimationPreview({
                     transform: isActive ? zoomTransform : 'scale(1)',
                     transitionProperty: 'transform',
                     transitionDuration: isActive ? `${activeDisplayMs}ms` : '0ms',
-                    filter: COLOR_FILTER_CSS[entry.colorFilter ?? 'none'] ?? 'none',
+                    filter: lookCss(entry.colorFilter, entry.effect),
                   }}
                 />
               )}
@@ -431,6 +453,42 @@ export default function ReelAnimationPreview({
 
         {active?.kind === 'media' && (
           <div className="pointer-events-none absolute inset-0 z-10">
+            {/* Effect overlays - film grain / VHS scanlines + stamp. */}
+            {active.effect === 'film' && (
+              <div
+                className="absolute inset-0"
+                style={{
+                  backgroundImage: `radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.45) 100%), ${GRAIN}`,
+                  mixBlendMode: 'multiply',
+                }}
+              />
+            )}
+            {active.effect === 'vhs_80s' && (
+              <>
+                <div
+                  className="absolute inset-0"
+                  style={{
+                    backgroundImage:
+                      'radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.4) 100%), repeating-linear-gradient(0deg, rgba(0,0,0,0.2) 0px, rgba(0,0,0,0.2) 1px, transparent 1px, transparent 3px)',
+                  }}
+                />
+                <span
+                  className="absolute text-white"
+                  style={{ left: px(60), top: px(100), fontFamily: reelFontFamily('bebas'), fontSize: px(58, 7), textShadow: '1px 1px 0 rgba(0,0,0,0.6)' }}
+                >
+                  PLAY ▶
+                </span>
+                <span
+                  className="absolute leading-none text-white"
+                  style={{ left: px(60), bottom: px(120), fontFamily: reelFontFamily('bebas'), fontSize: px(58, 7), textShadow: '1px 1px 0 rgba(0,0,0,0.6)' }}
+                >
+                  AM 12:00
+                  <br />
+                  JAN. 01 1988
+                </span>
+              </>
+            )}
+
             {/* Template chrome - mirrors reel_chrome.py's _draw_chrome. */}
             {activeTpl?.letterbox && (
               <>

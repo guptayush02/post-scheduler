@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.media import media_url_path
-from app.services import ai_editor, hf_media
+from app.services import ai_editor, hf_media, music_library
 from app.services.reel_templates import REEL_TEMPLATES, apply_template, get_template, public_templates
 
 REEL_TEMPLATE_IDS = list(REEL_TEMPLATES)
@@ -18,6 +18,7 @@ from app.models.post import MediaType, Platform, PostStatus, ScheduledPost
 from app.services.reel_generator import (
     COLOR_FILTERS,
     DEFAULT_TRANSITION,
+    EFFECTS,
     DEFAULT_ZOOM_STYLE,
     MAX_IMAGE_SECONDS,
     MIN_IMAGE_SECONDS,
@@ -170,6 +171,7 @@ def _post_response(post: ScheduledPost, account_name: str | None) -> PostRespons
         reel_target_seconds=post.reel_target_seconds,
         reel_audio_path=post.reel_audio_path,
         reel_audio_url=media_url_path(post.reel_audio_path) if post.reel_audio_path else None,
+        reel_music_track=post.reel_music_track,
         reel_audio_start_seconds=post.reel_audio_start_seconds,
         reel_audio_end_seconds=post.reel_audio_end_seconds,
         reel_voice_audio_path=post.reel_voice_audio_path,
@@ -184,6 +186,7 @@ def _post_response(post: ScheduledPost, account_name: str | None) -> PostRespons
         reel_text_layers=post.reel_text_layers,
         reel_image_text_layers=post.reel_image_text_layers,
         reel_image_color_filters=post.reel_image_color_filters,
+        reel_image_effects=post.reel_image_effects,
         reel_warning=post.reel_warning,
         reel_template=post.reel_template,
         reel_clip_templates=post.reel_clip_templates,
@@ -232,6 +235,15 @@ async def _account_name(post: ScheduledPost) -> str | None:
 @router.get("/reel-templates")
 async def reel_templates(current_user: User = Depends(get_current_user)):
     return public_templates()
+
+
+@router.get("/music/search")
+async def search_music(q: str = "", page: int = 1, current_user: User = Depends(get_current_user)):
+    """Free, video-safe music (CC0 / public domain / CC BY) via Openverse."""
+    try:
+        return await music_library.search(q, page)
+    except music_library.MusicError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
 
 @router.get("/reel-fonts")
@@ -372,6 +384,7 @@ async def regenerate_reel(
     text_layers: str = Form(default=""),
     image_text_layers: str = Form(default=""),
     image_color_filters: str = Form(default=""),
+    image_effects: str = Form(default=""),
     template: str | None = Form(default=None),
     brand_color: str | None = Form(default=None),
     title_text: str | None = Form(default=None),
@@ -383,6 +396,7 @@ async def regenerate_reel(
     ctas: str = Form(default=""),
     clip_templates: str = Form(default=""),
     new_clips: list[UploadFile] = File(default=[]),
+    music_track_id: str | None = Form(default=None),
     current_user: User = Depends(get_current_user),
 ):
     """Re-runs reel generation for an existing draft against its source
@@ -476,6 +490,7 @@ async def regenerate_reel(
         new_durations = parsed_durations
 
     new_color_filters = _parse_per_image(image_color_filters, COLOR_FILTERS, "image_color_filters")
+    new_effects = _parse_per_image(image_effects, EFFECTS, "image_effects")
     # Per-clip template ids; "none" (or "") = use the reel's template.
     new_clip_templates = _parse_per_image(clip_templates, ["", "none", *REEL_TEMPLATE_IDS], "clip_templates")
 
@@ -524,6 +539,7 @@ async def regenerate_reel(
             ("reel_image_durations", 3.0),
             ("reel_image_text_layers", []),
             ("reel_image_color_filters", "none"),
+            ("reel_image_effects", "none"),
             ("reel_clip_templates", None),
         ):
             stored = getattr(post, attr)
@@ -573,6 +589,11 @@ async def regenerate_reel(
     elif post.reel_clip_templates and len(post.reel_clip_templates) == n:
         post.reel_clip_templates = [post.reel_clip_templates[i] for i in order]
 
+    if new_effects is not None:
+        post.reel_image_effects = [new_effects[i] for i in order]
+    elif post.reel_image_effects and len(post.reel_image_effects) == n:
+        post.reel_image_effects = [post.reel_image_effects[i] for i in order]
+
     if new_color_filters is not None:
         post.reel_image_color_filters = [new_color_filters[i] for i in order]
     elif post.reel_image_color_filters and len(post.reel_image_color_filters) == n:
@@ -614,12 +635,28 @@ async def regenerate_reel(
         if post.reel_audio_path:
             Path(post.reel_audio_path).unlink(missing_ok=True)
         post.reel_audio_path = None
+        post.reel_music_track = None
         post.reel_audio_start_seconds = 0.0
         post.reel_audio_end_seconds = None
     elif audio is not None and audio.filename:
         if post.reel_audio_path:
             Path(post.reel_audio_path).unlink(missing_ok=True)
         post.reel_audio_path = await _save_audio_upload(current_user.id, audio)
+        post.reel_music_track = None
+        post.reel_audio_start_seconds = max(0.0, audio_start)
+        post.reel_audio_end_seconds = audio_end
+    elif music_track_id and music_track_id != (post.reel_music_track or {}).get("id"):
+        # A track picked from the free library - looked up again here and
+        # downloaded from the URL Openverse gives, never one from the client.
+        try:
+            track = await music_library.get_track(music_track_id)
+            path = await music_library.download(track, Path(settings.uploads_dir) / str(current_user.id))
+        except music_library.MusicError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+        if post.reel_audio_path:
+            Path(post.reel_audio_path).unlink(missing_ok=True)
+        post.reel_audio_path = path
+        post.reel_music_track = {**track, "credit": music_library.music_credit(track)}
         post.reel_audio_start_seconds = max(0.0, audio_start)
         post.reel_audio_end_seconds = audio_end
     elif post.reel_audio_path:
@@ -704,6 +741,8 @@ async def ai_edit_reel(
         post.reel_image_zoom_styles = [patch["zoom_style"]] * n
     if "color_filter" in patch:
         post.reel_image_color_filters = [patch["color_filter"]] * n
+    if "effect" in patch:
+        post.reel_image_effects = [patch["effect"]] * n
     if "target_seconds" in patch:
         post.reel_target_seconds = patch["target_seconds"]
         post.reel_image_durations = None  # re-split evenly across the new length

@@ -33,6 +33,8 @@ export default function AudioTrackEditor({
   onEndChange,
   onRemove,
   knownDuration = null,
+  sourceUrl = null,
+  sourceLabel = null,
   children,
 }: {
   label: string
@@ -48,13 +50,16 @@ export default function AudioTrackEditor({
   // Length in seconds when the file itself doesn't say (browser recordings
   // in WebM report an Infinity duration).
   knownDuration?: number | null
+  // A picked-but-not-yet-saved remote track (e.g. from the music library).
+  sourceUrl?: string | null
+  sourceLabel?: string | null
   // Extra controls shown under the label (e.g. a recorder).
   children?: React.ReactNode
 }) {
   const [duration, setDuration] = useState<number | null>(null)
 
   const objectUrl = useMemo(() => (file ? URL.createObjectURL(file) : null), [file])
-  const src = objectUrl ?? (hasExisting ? existingUrl ?? undefined : undefined)
+  const src = objectUrl ?? sourceUrl ?? (hasExisting ? existingUrl ?? undefined : undefined)
   const endOrDuration = end ?? duration ?? 0
 
   return (
@@ -72,6 +77,7 @@ export default function AudioTrackEditor({
         }}
         className="mt-1 block w-full text-sm text-gray-700 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-indigo-600 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-indigo-500"
       />
+      {!file && sourceLabel && <p className="mt-1 text-xs text-gray-600">{sourceLabel}</p>}
       {file && (
         <p className="mt-1 text-xs text-gray-600">
           {knownDuration != null ? `Recorded voiceover (${Math.round(knownDuration)}s)` : `Selected: ${file.name}`}

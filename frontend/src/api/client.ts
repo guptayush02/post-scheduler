@@ -112,6 +112,29 @@ export const DEFAULT_CTA: ReelCta = {
   animation: 'pop',
 }
 
+// Free, video-safe music (CC0 / public domain / CC BY) from Openverse - see
+// backend/app/services/music_library.py.
+export interface MusicTrack {
+  id: string
+  title: string
+  creator: string
+  duration: number | null
+  license: 'by' | 'cc0' | 'pdm' | string
+  license_version: string | null
+  license_url: string | null
+  landing_url: string | null
+  genres: string[]
+  preview_url: string
+  source: string
+  // CC BY attribution added to the post text (saved tracks only).
+  credit?: string | null
+}
+
+export async function searchMusic(query: string, page = 1): Promise<{ results: MusicTrack[]; page: number; page_count: number }> {
+  const res = await api.get('/posts/music/search', { params: { q: query, page } })
+  return res.data
+}
+
 export interface ReelFont {
   id: string
   name: string
@@ -131,6 +154,14 @@ export const REEL_COLOR_FILTERS: { value: string; label: string }[] = [
   { value: 'muted', label: 'Muted' },
   { value: 'vintage', label: 'Vintage' },
   { value: 'bw', label: 'Black & white' },
+]
+
+// Mirrors reel_generator.py's EFFECTS - whole looks layered on top of the
+// colour filter.
+export const REEL_EFFECTS: { value: string; label: string }[] = [
+  { value: 'none', label: 'No effect' },
+  { value: 'film', label: 'Vintage film (grain, faded)' },
+  { value: 'vhs_80s', label: '80s camcorder (VHS)' },
 ]
 
 export type ReelZoomStyle = 'zoom_in' | 'zoom_out' | 'pan_left' | 'pan_right' | 'none'
@@ -222,6 +253,7 @@ export interface Post {
   reel_target_seconds: number
   reel_audio_path: string | null
   reel_audio_url: string | null
+  reel_music_track: MusicTrack | null
   reel_audio_start_seconds: number
   reel_audio_end_seconds: number | null
   reel_voice_audio_path: string | null
@@ -236,6 +268,7 @@ export interface Post {
   reel_text_layers: ReelTextLayer[] | null
   reel_image_text_layers: ReelTextLayer[][] | null
   reel_image_color_filters: string[] | null
+  reel_image_effects: string[] | null
   reel_warning: string | null
   reel_template: string | null
   // Per-clip template overrides (same order as reel_source_images).
@@ -420,6 +453,7 @@ export interface RegenerateReelInput {
   textLayers?: ReelTextLayer[]
   imageTextLayers?: ReelTextLayer[][]
   imageColorFilters?: string[]
+  imageEffects?: string[]
   // Template id, or '' for none. Brand fields: '' clears.
   template?: string
   brandColor?: string
@@ -431,6 +465,8 @@ export interface RegenerateReelInput {
   logoScale?: number
   // Clip indices in the current (pre-reorder) order, like imageOrder.
   ctas?: ReelCta[]
+  // A free-library track to use as the music (downloaded by the backend).
+  musicTrackId?: string | null
   // Clips to add - they take indices n, n+1, ... after the post's current
   // n clips, in every per-image field and in imageOrder. A clip (old or
   // new) left out of imageOrder is removed from the reel.
@@ -463,6 +499,7 @@ export async function regenerateReel(id: string, input: RegenerateReelInput): Pr
   if (input.textLayers) form.append('text_layers', JSON.stringify(input.textLayers))
   if (input.imageTextLayers) form.append('image_text_layers', JSON.stringify(input.imageTextLayers))
   if (input.imageColorFilters) form.append('image_color_filters', input.imageColorFilters.join(','))
+  if (input.imageEffects) form.append('image_effects', input.imageEffects.join(','))
   if (input.template !== undefined) form.append('template', input.template)
   if (input.brandColor !== undefined) form.append('brand_color', input.brandColor)
   if (input.titleText !== undefined) form.append('title_text', input.titleText)
@@ -472,6 +509,7 @@ export async function regenerateReel(id: string, input: RegenerateReelInput): Pr
   if (input.logoY !== undefined) form.append('logo_y', String(input.logoY))
   if (input.logoScale !== undefined) form.append('logo_scale', String(input.logoScale))
   if (input.ctas) form.append('ctas', JSON.stringify(input.ctas))
+  if (input.musicTrackId) form.append('music_track_id', input.musicTrackId)
   for (const clip of input.newClips ?? []) form.append('new_clips', clip)
   if (input.clipTemplates) form.append('clip_templates', input.clipTemplates.map((t) => t || 'none').join(','))
   const res = await api.post<Post>(`/posts/${id}/regenerate`, form, {
@@ -490,6 +528,7 @@ export interface ReelTemplate {
   transitions?: string[]
   zoom_style: ReelZoomStyle
   color_filter: string
+  effect?: string
   hook_seconds?: number
   hook_style?: 'bold' | 'elegant'
   letterbox?: boolean

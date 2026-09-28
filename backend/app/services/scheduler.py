@@ -28,8 +28,13 @@ class PublishError(Exception):
 
 def _caption_for_publish(post: ScheduledPost) -> str:
     """The post text as published: the caption, plus the reel's call-to-
-    action links (a video can't carry a clickable link itself)."""
+    action links (a video can't carry a clickable link itself) and the
+    music credit its license requires."""
     lines = [f"{cta['text']}: {cta['link']}" for cta in post.reel_ctas or [] if cta.get("link")]
+    # CC BY music from the free library must be credited.
+    credit = (post.reel_music_track or {}).get("credit")
+    if credit:
+        lines.append(credit)
     if not lines:
         return post.caption
     return post.caption.rstrip() + "\n\n" + "\n".join(dict.fromkeys(lines))
@@ -274,6 +279,13 @@ async def poll_pending_reels() -> None:
                     "logo_scale": post.reel_logo_scale,
                 },
                 ctas=post.reel_ctas,
+                effects=(
+                    post.reel_image_effects
+                    if post.reel_image_effects and len(post.reel_image_effects) == n
+                    else [get_template(post.reel_template).get("effect", "none")] * n
+                    if get_template(post.reel_template)
+                    else None
+                ),
                 clip_templates=(
                     post.reel_clip_templates
                     if post.reel_clip_templates and len(post.reel_clip_templates) == n

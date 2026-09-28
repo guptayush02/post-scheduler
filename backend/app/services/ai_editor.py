@@ -14,7 +14,7 @@ import re
 import httpx
 
 from app.core.config import settings
-from app.services.reel_generator import COLOR_FILTERS, XFADE_TRANSITIONS, ZOOM_STYLES
+from app.services.reel_generator import COLOR_FILTERS, EFFECTS, XFADE_TRANSITIONS, ZOOM_STYLES
 from app.services.reel_templates import REEL_TEMPLATES
 from app.services.reel_text import (
     CTA_ANIMATIONS,
@@ -51,6 +51,7 @@ Reply with ONLY a JSON object - no prose, no code fences - using any of these op
 - "transition": one of [{", ".join(XFADE_TRANSITIONS)}] (used between every clip)
 - "zoom_style": one of [{", ".join(ZOOM_STYLES)}]
 - "color_filter": one of [{", ".join(COLOR_FILTERS)}]
+- "effect": one of [{", ".join(EFFECTS)}] (film = old film grain, vhs_80s = 80s camcorder/VHS look; applies to every clip)
 - "target_seconds": number between {MIN_SECONDS} and {MAX_SECONDS} (total video length)
 - "text_layers": list (max {MAX_TEXT_LAYERS}) of {{"text", "font" (one of [{", ".join(FONTS)}]; use "hind" for Hindi/Devanagari text), "font_size" ({MIN_FONT_SIZE}-{MAX_FONT_SIZE}, 56 is normal), "color" ("#RRGGBB"), "x" and "y" (centre of the text, 0-1 fractions of the frame: y 0.08 = top, 0.5 = middle, 0.88 = bottom), "background" (true for a dark box behind the text)}} - REPLACES all text shown over the whole video; keep existing layers you aren't asked to change; send [] to remove text
 - "title_text": the big title shown by the Bold Hook / Cinematic / Intro templates
@@ -87,6 +88,8 @@ def validate_patch(data: dict) -> tuple[dict, str]:
         patch["zoom_style"] = data["zoom_style"]
     if data.get("color_filter") in COLOR_FILTERS:
         patch["color_filter"] = data["color_filter"]
+    if data.get("effect") in EFFECTS:
+        patch["effect"] = data["effect"]
     if isinstance(data.get("target_seconds"), (int, float)):
         patch["target_seconds"] = max(MIN_SECONDS, min(float(data["target_seconds"]), MAX_SECONDS))
     if isinstance(data.get("text_layers"), list):
